@@ -3,3 +3,4 @@ pydeck
 pandas
 comtradeapicall
 requests
+plotly
