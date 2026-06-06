@@ -2,10 +2,15 @@ import streamlit as st
 import comtradeapicall as comtrade
 import pandas as pd
 import pydeck as pdk
+import plotly.express as px
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Global Semiconductor Trade Flows", layout="wide")
 st.title("Global Semiconductor Trade Flows (HS 8542)")
-st.caption("Integrated circuit exports from major producing nations, 2018–2024")
+st.caption(
+    "Integrated circuit exports from major semiconductor-producing nations, 2018–2024. "
+    "Data: UN Comtrade. Arc width proportional to export value."
+)
 
 # ── Data loading ───────────────────────────────────────────────────────────
 @st.cache_data
@@ -35,6 +40,7 @@ def load_data():
     df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
     return df
 
+# ── Constants ──────────────────────────────────────────────────────────────
 country_coords = {
     'CHN': (35.8617,  104.1954), 'TWN': (23.6978,  120.9605),
     'KOR': (35.9078,  127.7669), 'NLD': (52.1326,    5.2913),
@@ -59,7 +65,12 @@ colour_map = {
     'Japan':         [255, 255,   0, 200],
 }
 
-# ── Controls ───────────────────────────────────────────────────────────────
+hex_colours = {
+    country: '#{:02x}{:02x}{:02x}'.format(*c[:3])
+    for country, c in colour_map.items()
+}
+
+# ── Load and prepare arc data ──────────────────────────────────────────────
 df = load_data()
 
 coords_df = pd.DataFrame.from_dict(
@@ -85,14 +96,67 @@ df_arcs = df_arcs.groupby([
     'period', 'source_lat', 'source_lon', 'target_lat', 'target_lon'
 ])['primaryValue'].sum().reset_index()
 
+# ── Sidebar legend ─────────────────────────────────────────────────────────
+st.sidebar.markdown("## Countries")
+for country, hex_c in hex_colours.items():
+    st.sidebar.markdown(
+        f'<span style="color:{hex_c}; font-size:18px">■</span> {country}',
+        unsafe_allow_html=True
+    )
+
+st.sidebar.markdown("---")
+st.sidebar.markdown(
+    "**Source:** UN Comtrade  \n"
+    "**Product:** HS 8542 — Electronic integrated circuits  \n"
+    "**Flow:** Exports  \n"
+    "**Coverage:** 2018–2024"
+)
+
+# ── Year slider ────────────────────────────────────────────────────────────
 year = st.slider("Select year", 2018, 2024, 2023)
 
-df_year = df_arcs[df_arcs['period'] == str(year)].copy()
-df_year['color'] = df_year['reporterDesc'].map(colour_map)
-max_val = df_year['primaryValue'].max()
-df_year['width'] = (df_year['primaryValue'] / max_val * 25).clip(lower=2)
+# ── Filter to selected year ────────────────────────────────────────────────
+df_year     = df_arcs[df_arcs['period'] == str(year)].copy()
+df_year_all = df[df['period'] == str(year)]           # full data for accurate metrics
+df_prev_all = df[df['period'] == str(year - 1)] if year > 2018 else None
 
-# ── Map ────────────────────────────────────────────────────────────────────
+def fmt(val):
+    if val >= 1e12:
+        return f"${val/1e12:.2f}T"
+    elif val >= 1e9:
+        return f"${val/1e9:.1f}B"
+    else:
+        return f"${val/1e6:.0f}M"
+
+# ── Metrics cards ──────────────────────────────────────────────────────────
+total_cur    = df_year_all['primaryValue'].sum()
+total_prev   = df_prev_all['primaryValue'].sum() if df_prev_all is not None else None
+taiwan_val   = df_year_all[df_year_all['reporterDesc'] == 'Taiwan']['primaryValue'].sum()
+taiwan_share = taiwan_val / total_cur * 100 if total_cur > 0 else 0
+china_val    = df_year_all[df_year_all['reporterDesc'] == 'China']['primaryValue'].sum()
+china_share  = china_val / total_cur * 100 if total_cur > 0 else 0
+
+yoy_delta = (
+    f"{((total_cur - total_prev) / total_prev * 100):+.1f}% YoY"
+    if total_prev else None
+)
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Total IC Exports", fmt(total_cur), delta=yoy_delta)
+with col2:
+    st.metric("Taiwan's Share", f"{taiwan_share:.1f}%")
+with col3:
+    st.metric("China's Share", f"{china_share:.1f}%")
+
+st.markdown("---")
+
+# ── Arc map ────────────────────────────────────────────────────────────────
+df_year['color']     = df_year['reporterDesc'].map(colour_map)
+max_val              = df_year['primaryValue'].max()
+df_year['width']     = (df_year['primaryValue'] / max_val * 25).clip(lower=2)
+df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)   # formatted tooltip
+
 arc_layer = pdk.Layer(
     'ArcLayer', data=df_year,
     get_source_position=['source_lon', 'source_lat'],
@@ -107,14 +171,71 @@ st.pydeck_chart(pdk.Deck(
     layers=[arc_layer],
     initial_view_state=view,
     map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-    tooltip={'text': '{reporterDesc} → {partnerDesc}\n${primaryValue}'}
+    tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}   # formatted
 ))
 
-# ── Legend ─────────────────────────────────────────────────────────────────
-st.sidebar.markdown("## Legend")
-for country, colour in colour_map.items():
-    hex_colour = '#{:02x}{:02x}{:02x}'.format(*colour[:3])
-    st.sidebar.markdown(
-        f'<span style="color:{hex_colour}">■</span> {country}',
-        unsafe_allow_html=True
-    )
+st.markdown("---")
+
+# ── Time series chart ──────────────────────────────────────────────────────
+st.subheader("IC Export Trends by Country (2018–2024)")
+
+df_trend = (
+    df.groupby(['reporterDesc', 'period'])['primaryValue']
+    .sum()
+    .reset_index()
+)
+df_trend['period']  = df_trend['period'].astype(int)
+df_trend['value_B'] = df_trend['primaryValue'] / 1e9
+
+colour_map_hex = {k: hex_colours[k] for k in hex_colours}
+
+fig = px.line(
+    df_trend,
+    x='period',
+    y='value_B',
+    color='reporterDesc',
+    markers=True,
+    labels={
+        'value_B':     'Export Value (USD Billion)',
+        'period':      'Year',
+        'reporterDesc': 'Country'
+    },
+    color_discrete_map=colour_map_hex,
+)
+
+# Mark selected year
+fig.add_vline(
+    x=year,
+    line_dash='dot',
+    line_color='white',
+    opacity=0.4,
+)
+
+# Mark October 2022 US export controls
+fig.add_vline(
+    x=2022,
+    line_dash='dash',
+    line_color='#FF4444',
+    opacity=0.8,
+)
+fig.add_annotation(
+    x=2022.05,
+    y=df_trend['value_B'].max() * 0.95,
+    text="US Export Controls<br>Oct 2022",
+    showarrow=False,
+    font=dict(color='#FF4444', size=11),
+    xanchor='left',
+)
+
+fig.update_layout(
+    plot_bgcolor='rgba(0,0,0,0)',
+    paper_bgcolor='rgba(0,0,0,0)',
+    font_color='white',
+    legend_title='Country',
+    xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(255,255,255,0.1)'),
+    yaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
+    hovermode='x unified',
+    margin=dict(t=20),
+)
+
+st.plotly_chart(fig, use_container_width=True)
