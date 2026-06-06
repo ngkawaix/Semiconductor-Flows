@@ -3,7 +3,6 @@ import comtradeapicall as comtrade
 import pandas as pd
 import pydeck as pdk
 import plotly.express as px
-import plotly.graph_objects as go
 
 st.set_page_config(page_title="Global Semiconductor Trade Flows", layout="wide")
 st.title("Global Semiconductor Trade Flows (HS 8542)")
@@ -13,7 +12,7 @@ st.caption(
 )
 
 # ── Data loading ───────────────────────────────────────────────────────────
-@st.cache_data
+@st.cache_data(show_spinner="Fetching data from UN Commtrade...")
 def load_data():
     subscription_key = st.secrets["COMTRADE_KEY"]
     years = ','.join(str(y) for y in range(2018, 2025))
@@ -96,13 +95,20 @@ df_arcs = df_arcs.groupby([
     'period', 'source_lat', 'source_lon', 'target_lat', 'target_lon'
 ])['primaryValue'].sum().reset_index()
 
-# ── Sidebar legend ─────────────────────────────────────────────────────────
-st.sidebar.markdown("## Countries")
+# ── Sidebar — country toggles ──────────────────────────────────────────────
+st.sidebar.markdown("## Filter Countries")
+st.sidebar.markdown("Toggle countries on or off to isolate specific flows.")
+st.sidebar.markdown("")
+
+selected_countries = []
 for country, hex_c in hex_colours.items():
-    st.sidebar.markdown(
-        f'<span style="color:{hex_c}; font-size:18px">■</span> {country}',
-        unsafe_allow_html=True
+    checked = st.sidebar.checkbox(
+        label=country,
+        value=True,
+        key=f"toggle_{country}"
     )
+    if checked:
+        selected_countries.append(country)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
@@ -115,9 +121,13 @@ st.sidebar.markdown(
 # ── Year slider ────────────────────────────────────────────────────────────
 year = st.slider("Select year", 2018, 2024, 2023)
 
-# ── Filter to selected year ────────────────────────────────────────────────
-df_year     = df_arcs[df_arcs['period'] == str(year)].copy()
-df_year_all = df[df['period'] == str(year)]           # full data for accurate metrics
+# ── Filter to selected year and countries ──────────────────────────────────
+df_year     = df_arcs[
+    (df_arcs['period'] == str(year)) &
+    (df_arcs['reporterDesc'].isin(selected_countries))
+].copy()
+
+df_year_all = df[df['period'] == str(year)]
 df_prev_all = df[df['period'] == str(year - 1)] if year > 2018 else None
 
 def fmt(val):
@@ -152,27 +162,30 @@ with col3:
 st.markdown("---")
 
 # ── Arc map ────────────────────────────────────────────────────────────────
-df_year['color']     = df_year['reporterDesc'].map(colour_map)
-max_val              = df_year['primaryValue'].max()
-df_year['width']     = (df_year['primaryValue'] / max_val * 25).clip(lower=2)
-df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)   # formatted tooltip
+if selected_countries:
+    df_year['color']     = df_year['reporterDesc'].map(colour_map)
+    max_val              = df_year['primaryValue'].max()
+    df_year['width']     = (df_year['primaryValue'] / max_val * 25).clip(lower=2)
+    df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
 
-arc_layer = pdk.Layer(
-    'ArcLayer', data=df_year,
-    get_source_position=['source_lon', 'source_lat'],
-    get_target_position=['target_lon', 'target_lat'],
-    get_source_color='color', get_target_color='color',
-    get_width='width', pickable=True, auto_highlight=True,
-)
+    arc_layer = pdk.Layer(
+        'ArcLayer', data=df_year,
+        get_source_position=['source_lon', 'source_lat'],
+        get_target_position=['target_lon', 'target_lat'],
+        get_source_color='color', get_target_color='color',
+        get_width='width', pickable=True, auto_highlight=True,
+    )
 
-view = pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=20)
+    view = pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=20)
 
-st.pydeck_chart(pdk.Deck(
-    layers=[arc_layer],
-    initial_view_state=view,
-    map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-    tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}   # formatted
-))
+    st.pydeck_chart(pdk.Deck(
+        layers=[arc_layer],
+        initial_view_state=view,
+        map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+        tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
+    ))
+else:
+    st.info("Select at least one country in the sidebar to display the map.")
 
 st.markdown("---")
 
@@ -187,40 +200,27 @@ df_trend = (
 df_trend['period']  = df_trend['period'].astype(int)
 df_trend['value_B'] = df_trend['primaryValue'] / 1e9
 
-colour_map_hex = {k: hex_colours[k] for k in hex_colours}
+# Filter trend chart to match selected countries
+df_trend = df_trend[df_trend['reporterDesc'].isin(selected_countries)]
 
 fig = px.line(
     df_trend,
-    x='period',
-    y='value_B',
+    x='period', y='value_B',
     color='reporterDesc',
     markers=True,
     labels={
-        'value_B':     'Export Value (USD Billion)',
-        'period':      'Year',
+        'value_B':      'Export Value (USD Billion)',
+        'period':       'Year',
         'reporterDesc': 'Country'
     },
-    color_discrete_map=colour_map_hex,
+    color_discrete_map=hex_colours,
 )
 
-# Mark selected year
-fig.add_vline(
-    x=year,
-    line_dash='dot',
-    line_color='white',
-    opacity=0.4,
-)
-
-# Mark October 2022 US export controls
-fig.add_vline(
-    x=2022,
-    line_dash='dash',
-    line_color='#FF4444',
-    opacity=0.8,
-)
+fig.add_vline(x=year,   line_dash='dot',  line_color='white',   opacity=0.4)
+fig.add_vline(x=2022,   line_dash='dash', line_color='#FF4444', opacity=0.8)
 fig.add_annotation(
     x=2022.05,
-    y=df_trend['value_B'].max() * 0.95,
+    y=df_trend['value_B'].max() * 0.95 if not df_trend.empty else 1,
     text="US Export Controls<br>Oct 2022",
     showarrow=False,
     font=dict(color='#FF4444', size=11),
