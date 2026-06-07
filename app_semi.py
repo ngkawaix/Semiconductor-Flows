@@ -313,7 +313,7 @@ with tab2:
 
     styled = (
         summary.style
-        .applymap(colour_status, subset=['Status'])
+        .map(colour_status, subset=['Status'])
         .format({
             'Equip Imports 2018 ($B)':    '${:.2f}B',
             'Equip Imports Latest ($B)':  '${:.2f}B',
