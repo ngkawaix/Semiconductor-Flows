@@ -216,18 +216,21 @@ with tab1:
         df_year['width']     = (df_year['primaryValue'] / df_year['primaryValue'].max() * 25).clip(lower=2)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
 
-        st.pydeck_chart(pdk.Deck(
-            layers=[pdk.Layer(
-                'ArcLayer', data=df_year,
-                get_source_position=['source_lon','source_lat'],
-                get_target_position=['target_lon','target_lat'],
-                get_source_color='color', get_target_color='color',
-                get_width='width', pickable=True, auto_highlight=True,
-            )],
-            initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=20),
-            map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-            tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
-        ))
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[pdk.Layer(
+                    'ArcLayer', data=df_year,
+                    get_source_position=['source_lon','source_lat'],
+                    get_target_position=['target_lon','target_lat'],
+                    get_source_color='color', get_target_color='color',
+                    get_width='width', pickable=True, auto_highlight=True,
+                )],
+                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=20),
+                map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+                tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
+            ),
+            key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}"
+        )
     else:
         st.info("Select at least one country in the sidebar to display the map.")
 
