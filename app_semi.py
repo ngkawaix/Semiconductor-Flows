@@ -171,9 +171,11 @@ _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ff
 def build_sankey_fig(df_flow, hex_palette):
     """Build a Plotly Sankey figure from a reporter→partner flow DataFrame.
 
-    Nodes are spread across 5–95 % of the chart height so the top and bottom
-    nodes never clip against the figure boundary, regardless of how many rows
-    are shown. Chart height scales with the number of destination nodes.
+    Uses Plotly's default 'perpendicular' layout (no fixed x/y positions).
+    Because the data is strictly one-directional after exporter filtering,
+    Plotly naturally places source nodes on the left and destination nodes on
+    the right — without any manual positioning. This avoids the clipping that
+    occurs when large-value node bars overflow manually-set y boundaries.
 
     Args:
         df_flow: DataFrame with columns reporterDesc, partnerDesc, primaryValue
@@ -186,14 +188,6 @@ def build_sankey_fig(df_flow, hex_palette):
     n_src = len(src_nodes)
     n_tgt = len(tgt_nodes)
 
-    def spread(n):
-        """Spread n nodes evenly between y=0.05 and y=0.95."""
-        if n == 1:
-            return [0.5]
-        return [round(0.05 + i * 0.90 / (n - 1), 3) for i in range(n)]
-
-    node_x      = [0.01] * n_src + [0.99] * n_tgt
-    node_y      = spread(n_src) + spread(n_tgt)
     node_colors = (
         [hex_palette.get(n, '#888888') for n in src_nodes] +
         [_YLGNBU_DEST[i % len(_YLGNBU_DEST)] for i in range(n_tgt)]
@@ -204,15 +198,13 @@ def build_sankey_fig(df_flow, hex_palette):
     link_values   = (df_flow['primaryValue'] / 1e9).round(1).tolist()
     link_colors   = [hex_to_rgba(hex_palette.get(r, '#888888')) for r in df_flow['reporterDesc']]
 
-    # Height scales with the busier (right) side; minimum 520 px
-    height = max(520, max(n_src, n_tgt) * 70 + 130)
+    # Height scales with node count; Plotly manages the vertical layout
+    height = max(480, max(n_src, n_tgt) * 60 + 100)
 
     fig = go.Figure(go.Sankey(
-        arrangement='fixed',
         node=dict(
-            pad=18, thickness=20,
+            pad=20, thickness=20,
             label=all_nodes, color=node_colors,
-            x=node_x, y=node_y,
             hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>',
         ),
         link=dict(
@@ -224,7 +216,7 @@ def build_sankey_fig(df_flow, hex_palette):
     ))
     fig.update_layout(
         paper_bgcolor='rgba(0,0,0,0)',
-        margin=dict(t=60, b=50, l=10, r=10),
+        margin=dict(t=20, b=20, l=10, r=10),
         height=height,
     )
     return fig
