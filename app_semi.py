@@ -33,6 +33,27 @@ def load_global_data():
     return df
 
 @st.cache_data
+def load_global_equip_data():
+    """HS 8486 — semiconductor equipment exports from the five major tool makers."""
+    key   = st.secrets["COMTRADE_KEY"]
+    years = ','.join(str(y) for y in range(2018, 2026))
+    df    = comtrade.getFinalData(
+        key, typeCode='C', freqCode='A', clCode='HS', period=years,
+        reporterCode='528,842,392,276,410',   # Netherlands, USA, Japan, Germany, S. Korea
+        cmdCode='8486', flowCode='X',
+        partnerCode=None, partner2Code=None, customsCode=None, motCode=None,
+        maxRecords=250000, format_output='JSON', aggregateBy=None,
+        breakdownMode='classic', countOnly=None, includeDesc=True
+    )
+    cols = ['reporterDesc','reporterISO','partnerDesc','partnerISO','period','primaryValue']
+    df   = df[cols].copy()
+    df   = df[df['partnerISO'] != 'W00']
+    df['reporterDesc'] = df['reporterDesc'].replace('Other Asia, nes', 'Taiwan')
+    df['partnerDesc']  = df['partnerDesc'].replace('Other Asia, nes', 'Taiwan')
+    df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
+    return df
+
+@st.cache_data
 def load_asean_equip():
     key   = st.secrets["COMTRADE_KEY"]
     years = ','.join(str(y) for y in range(2018, 2026))
@@ -95,6 +116,23 @@ colour_map = {
     'Netherlands':   [127, 205, 187, 210],
     'USA':           [34,   94, 168, 210],
     'Japan':         [199, 233, 180, 210],
+}
+
+# Equipment producer colours (HS 8486) — Germany added as muted purple
+equip_src_hex = {
+    'Netherlands':   '#7fcdbb',
+    'USA':           '#225ea8',
+    'Japan':         '#c7e9b4',
+    'Germany':       '#9e9ac8',
+    'Rep. of Korea': '#41b6c4',
+}
+
+equip_colour_map = {
+    'Netherlands':   [127, 205, 187, 210],
+    'USA':           [34,   94, 168, 210],
+    'Japan':         [199, 233, 180, 210],
+    'Germany':       [158, 154, 200, 210],
+    'Rep. of Korea': [65,  182, 196, 210],
 }
 
 # YlGnBu status colours for ASEAN table
@@ -189,20 +227,35 @@ def build_asean_summary(df_equip, df_chips):
 
 # ── Load all data ──────────────────────────────────────────────────────────
 with st.spinner("Loading UN Comtrade data — this may take a moment on first load..."):
-    df_global = load_global_data()
-    df_equip  = load_asean_equip()
-    df_chips  = load_asean_chips()
+    df_global       = load_global_data()
+    df_global_equip = load_global_equip_data()
+    df_equip        = load_asean_equip()
+    df_chips        = load_asean_chips()
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 st.sidebar.title("Controls")
-st.sidebar.markdown("### Filter Countries")
-st.sidebar.caption("Applies to the Global Supply Chain tab.")
+st.sidebar.markdown("### IC Producers")
+st.sidebar.caption("Applies to the IC section of Tab 1.")
 
 selected_countries = []
 for country, hex_c in src_hex.items():
     label = f'<span style="color:{hex_c}; font-size:16px">■</span> {country}'
     if st.sidebar.checkbox(country, value=True, key=f"toggle_{country}"):
         selected_countries.append(country)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Equipment Exporters")
+st.sidebar.caption("Applies to the Equipment section of Tab 1.")
+
+selected_equip_countries = []
+for country, hex_c in equip_src_hex.items():
+    if st.sidebar.checkbox(country, value=True, key=f"eq_toggle_{country}"):
+        selected_equip_countries.append(country)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Select Year")
+st.sidebar.caption("Applies to the Global Supply Chain tab.")
+year = st.sidebar.slider("Year", 2018, 2025, 2024, label_visibility="collapsed")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
@@ -219,15 +272,20 @@ tab1, tab2 = st.tabs(["🌍  Global Supply Chain", "🌏  ASEAN Value Chain"])
 # TAB 1 — GLOBAL SUPPLY CHAIN
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.title("Global Semiconductor Trade Flows (HS 8542)")
-    st.caption(
-        "Integrated circuit exports from major producing nations, 2018–2025. "
-        "Arc width proportional to export value. Data: UN Comtrade."
-    )
+    st.title("Global Semiconductor Trade Flows")
 
+    # Shared coordinate lookup used by both arc maps
     coords_df = (
         pd.DataFrame.from_dict(country_coords, orient='index', columns=['lat','lon'])
         .reset_index().rename(columns={'index':'ISO'})
+    )
+
+    # ══ SECTION 1 — INTEGRATED CIRCUITS (HS 8542) ════════════════════════════
+    st.header("🔬 Integrated Circuits (HS 8542)")
+    st.caption(
+        "Exports from major IC-producing nations. "
+        "Left = exporters, right = destination markets. "
+        "Arc width proportional to export value. Data: UN Comtrade."
     )
 
     df_arcs = (
@@ -235,7 +293,6 @@ with tab1:
         .merge(coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}), on='reporterISO', how='inner')
         .merge(coords_df.rename(columns={'ISO':'partnerISO', 'lat':'target_lat', 'lon':'target_lon'}), on='partnerISO',  how='inner')
     )
-
     top_partners = (
         df_arcs.groupby('partnerISO')['primaryValue']
         .sum().sort_values(ascending=False).head(15).index.tolist()
@@ -246,8 +303,6 @@ with tab1:
                   'period','source_lat','source_lon','target_lat','target_lon'])
         ['primaryValue'].sum().reset_index()
     )
-
-    year = st.slider("Select year", 2018, 2025, 2024)
 
     df_year     = df_arcs[(df_arcs['period']==str(year)) & (df_arcs['reporterDesc'].isin(selected_countries))].copy()
     df_year_all = df_global[df_global['period']==str(year)]
@@ -269,7 +324,6 @@ with tab1:
         df_year['color']     = df_year['reporterDesc'].map(colour_map)
         df_year['width']     = (df_year['primaryValue'] / df_year['primaryValue'].max() * 25).clip(lower=2)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
-
         st.pydeck_chart(
             pdk.Deck(
                 layers=[pdk.Layer(
@@ -286,11 +340,70 @@ with tab1:
             key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}"
         )
     else:
-        st.info("Select at least one country in the sidebar to display the map.")
+        st.info("Select at least one IC producer in the sidebar to display the map.")
 
     st.markdown("---")
 
-    # ── Time series ────────────────────────────────────────────────────────
+    # ── IC Sankey ──────────────────────────────────────────────────────────
+    st.subheader("Supply chain flow — IC producers to destinations")
+    st.caption(
+        "Left: 6 major IC-producing nations. "
+        "Right: their top 8 export destinations for the selected year (excluding producers)."
+    )
+
+    producer_set = set(colour_map.keys())
+    df_sk = (
+        df_global[df_global['period'] == str(year)]
+        .groupby(['reporterDesc', 'partnerDesc'])['primaryValue']
+        .sum().reset_index()
+    )
+    df_sk = df_sk[
+        df_sk['reporterDesc'].isin(selected_countries) &
+        ~df_sk['partnerDesc'].isin(producer_set)
+    ]
+    top_dest = df_sk.groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+    df_sk    = df_sk[df_sk['partnerDesc'].isin(top_dest)]
+
+    if not df_sk.empty:
+        src_nodes = list(df_sk['reporterDesc'].unique())
+        tgt_nodes = list(df_sk['partnerDesc'].unique())
+        all_nodes = src_nodes + tgt_nodes
+        node_idx  = {n: i for i, n in enumerate(all_nodes)}
+        n_src = len(src_nodes);  n_tgt = len(tgt_nodes)
+        node_x = [0.01] * n_src + [0.99] * n_tgt
+        node_y = (
+            [round((i + 0.5) / n_src, 3) for i in range(n_src)] +
+            [round((i + 0.5) / n_tgt, 3) for i in range(n_tgt)]
+        )
+        ylgnbu_dest = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb',
+                       '#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
+        node_colors = (
+            [src_hex.get(n, '#888888') for n in src_nodes] +
+            [ylgnbu_dest[i % len(ylgnbu_dest)] for i in range(n_tgt)]
+        )
+        link_sources = [node_idx[r] for r in df_sk['reporterDesc']]
+        link_targets  = [node_idx[t] for t in df_sk['partnerDesc']]
+        link_values   = (df_sk['primaryValue'] / 1e9).round(1).tolist()
+        link_colors   = [hex_to_rgba(src_hex.get(r, '#888888')) for r in df_sk['reporterDesc']]
+        fig_sk = go.Figure(go.Sankey(
+            arrangement='fixed',
+            node=dict(pad=20, thickness=20, label=all_nodes, color=node_colors,
+                      x=node_x, y=node_y,
+                      hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>'),
+            link=dict(source=link_sources, target=link_targets, value=link_values,
+                      color=link_colors,
+                      hovertemplate='%{source.label} → %{target.label}<br>$%{value:.1f}B<extra></extra>'),
+            textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
+        ))
+        fig_sk.update_layout(paper_bgcolor='rgba(0,0,0,0)',
+                             margin=dict(t=10, b=10, l=10, r=10), height=500)
+        st.plotly_chart(fig_sk, width='stretch')
+    else:
+        st.info("Select at least one IC producer in the sidebar to display the Sankey.")
+
+    st.markdown("---")
+
+    # ── IC Time series ─────────────────────────────────────────────────────
     st.subheader("IC Export Trends by Country (2018–2025)")
     df_trend = (
         df_global[df_global['reporterDesc'].isin(selected_countries)]
@@ -298,7 +411,6 @@ with tab1:
     )
     df_trend['period']  = df_trend['period'].astype(int)
     df_trend['value_B'] = df_trend['primaryValue'] / 1e9
-
     fig_ts = px.line(
         df_trend, x='period', y='value_B', color='reporterDesc', markers=True,
         labels={'value_B':'Export Value (USD Billion)','period':'Year','reporterDesc':'Country'},
@@ -320,82 +432,167 @@ with tab1:
     )
     st.plotly_chart(fig_ts, width='stretch')
 
+    # ══ SECTION 2 — SEMICONDUCTOR EQUIPMENT (HS 8486) ════════════════════════
+    st.divider()
+    st.header("⚙️ Semiconductor Equipment (HS 8486)")
+    st.caption(
+        "Exports of lithography machines (EUV/DUV), etch tools, deposition systems, and metrology. "
+        "Left = equipment exporters, right = fab nations buying equipment. "
+        "Data: UN Comtrade."
+    )
+
+    df_arcs_eq = (
+        df_global_equip
+        .merge(coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}), on='reporterISO', how='inner')
+        .merge(coords_df.rename(columns={'ISO':'partnerISO', 'lat':'target_lat', 'lon':'target_lon'}), on='partnerISO',  how='inner')
+    )
+    top_partners_eq = (
+        df_arcs_eq.groupby('partnerISO')['primaryValue']
+        .sum().sort_values(ascending=False).head(15).index.tolist()
+    )
+    df_arcs_eq = (
+        df_arcs_eq[df_arcs_eq['partnerISO'].isin(top_partners_eq) & (df_arcs_eq['target_lat'] < 60)]
+        .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
+                  'period','source_lat','source_lon','target_lat','target_lon'])
+        ['primaryValue'].sum().reset_index()
+    )
+
+    df_eq_year     = df_arcs_eq[(df_arcs_eq['period']==str(year)) & (df_arcs_eq['reporterDesc'].isin(selected_equip_countries))].copy()
+    df_eq_year_all = df_global_equip[df_global_equip['period']==str(year)]
+    df_eq_prev_all = df_global_equip[df_global_equip['period']==str(year-1)] if year > 2018 else None
+
+    total_eq_cur  = df_eq_year_all['primaryValue'].sum()
+    total_eq_prev = df_eq_prev_all['primaryValue'].sum() if df_eq_prev_all is not None else None
+    yoy_eq        = f"{((total_eq_cur-total_eq_prev)/total_eq_prev*100):+.1f}% YoY" if total_eq_prev else None
+    nld_share     = (
+        df_eq_year_all[df_eq_year_all['reporterDesc']=='Netherlands']['primaryValue'].sum()
+        / total_eq_cur * 100
+    ) if total_eq_cur > 0 else 0
+
+    producer_set_eq = set(equip_colour_map.keys())
+    top_eq_dest_ser = (
+        df_eq_year_all[~df_eq_year_all['partnerDesc'].isin(producer_set_eq)]
+        .groupby('partnerDesc')['primaryValue'].sum()
+    )
+    top_eq_importer = top_eq_dest_ser.idxmax() if not top_eq_dest_ser.empty else 'N/A'
+
+    e1, e2, e3 = st.columns(3)
+    e1.metric("Total Equipment Exports",    fmt(total_eq_cur), delta=yoy_eq)
+    e2.metric("Netherlands' Share (ASML)",  f"{nld_share:.1f}%")
+    e3.metric("Largest Equipment Buyer",    top_eq_importer)
     st.markdown("---")
 
-    # ── Sankey ─────────────────────────────────────────────────────────────
-    st.subheader("Supply chain flow — producers to destinations")
+    if selected_equip_countries and not df_eq_year.empty:
+        df_eq_year['color']     = df_eq_year['reporterDesc'].map(equip_colour_map)
+        df_eq_year['width']     = (df_eq_year['primaryValue'] / df_eq_year['primaryValue'].max() * 25).clip(lower=2)
+        df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[pdk.Layer(
+                    'ArcLayer', data=df_eq_year,
+                    get_source_position=['source_lon','source_lat'],
+                    get_target_position=['target_lon','target_lat'],
+                    get_source_color='color', get_target_color='color',
+                    get_width='width', pickable=True, auto_highlight=True,
+                )],
+                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=20),
+                map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+                tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
+            ),
+            key=f"arc_eq_{year}_{'_'.join(sorted(selected_equip_countries))}"
+        )
+    else:
+        st.info("Select at least one equipment exporter in the sidebar to display the map.")
 
-    producer_set = set(colour_map.keys())
+    st.markdown("---")
 
-    df_sk = (
-        df_global[df_global['period'] == str(year)]
+    # ── Equipment Sankey ───────────────────────────────────────────────────
+    st.subheader("Supply chain flow — equipment makers to fab nations")
+    st.caption(
+        "Left: 5 major equipment-exporting nations. "
+        "Right: their top 8 destination markets for the selected year (excluding equipment producers)."
+    )
+
+    df_sk_eq = (
+        df_global_equip[df_global_equip['period'] == str(year)]
         .groupby(['reporterDesc', 'partnerDesc'])['primaryValue']
         .sum().reset_index()
     )
-    df_sk = df_sk[
-        df_sk['reporterDesc'].isin(selected_countries) &
-        ~df_sk['partnerDesc'].isin(producer_set)
+    df_sk_eq = df_sk_eq[
+        df_sk_eq['reporterDesc'].isin(selected_equip_countries) &
+        ~df_sk_eq['partnerDesc'].isin(producer_set_eq)
     ]
+    top_eq_dest = df_sk_eq.groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+    df_sk_eq    = df_sk_eq[df_sk_eq['partnerDesc'].isin(top_eq_dest)]
 
-    top_dest = df_sk.groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
-    df_sk    = df_sk[df_sk['partnerDesc'].isin(top_dest)]
-
-    if not df_sk.empty:
-        hub_set   = {'China, Hong Kong SAR', 'Singapore', 'Malaysia'}
-        src_nodes = list(df_sk['reporterDesc'].unique())
-        tgt_nodes = list(df_sk['partnerDesc'].unique())
-        all_nodes = src_nodes + tgt_nodes
-        node_idx  = {n: i for i, n in enumerate(all_nodes)}
-
-        n_src = len(src_nodes)
-        n_tgt = len(tgt_nodes)
-
-        node_x = [0.01] * n_src + [0.99] * n_tgt
-        node_y = (
-            [round((i + 0.5) / n_src, 3) for i in range(n_src)] +
-            [round((i + 0.5) / n_tgt, 3) for i in range(n_tgt)]
+    if not df_sk_eq.empty:
+        eq_src_nodes = list(df_sk_eq['reporterDesc'].unique())
+        eq_tgt_nodes = list(df_sk_eq['partnerDesc'].unique())
+        eq_all_nodes = eq_src_nodes + eq_tgt_nodes
+        eq_node_idx  = {n: i for i, n in enumerate(eq_all_nodes)}
+        eq_n_src = len(eq_src_nodes);  eq_n_tgt = len(eq_tgt_nodes)
+        eq_node_x = [0.01] * eq_n_src + [0.99] * eq_n_tgt
+        eq_node_y = (
+            [round((i + 0.5) / eq_n_src, 3) for i in range(eq_n_src)] +
+            [round((i + 0.5) / eq_n_tgt, 3) for i in range(eq_n_tgt)]
         )
-
-        # Destination nodes: gradient from YlGnBu by rank
         ylgnbu_dest = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb',
                        '#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
-        node_colors = (
-            [src_hex.get(n, '#888888') for n in src_nodes] +
-            [ylgnbu_dest[i % len(ylgnbu_dest)] for i in range(n_tgt)]
+        eq_node_colors = (
+            [equip_src_hex.get(n, '#888888') for n in eq_src_nodes] +
+            [ylgnbu_dest[i % len(ylgnbu_dest)] for i in range(eq_n_tgt)]
         )
-
-        link_sources = [node_idx[r] for r in df_sk['reporterDesc']]
-        link_targets  = [node_idx[t] for t in df_sk['partnerDesc']]
-        link_values   = (df_sk['primaryValue'] / 1e9).round(1).tolist()
-        link_colors   = [hex_to_rgba(src_hex.get(r, '#888888')) for r in df_sk['reporterDesc']]
-
-        fig_sk = go.Figure(go.Sankey(
+        eq_link_sources = [eq_node_idx[r] for r in df_sk_eq['reporterDesc']]
+        eq_link_targets  = [eq_node_idx[t] for t in df_sk_eq['partnerDesc']]
+        eq_link_values   = (df_sk_eq['primaryValue'] / 1e9).round(1).tolist()
+        eq_link_colors   = [hex_to_rgba(equip_src_hex.get(r, '#888888')) for r in df_sk_eq['reporterDesc']]
+        fig_sk_eq = go.Figure(go.Sankey(
             arrangement='fixed',
-            node=dict(
-                pad=20, thickness=20,
-                label=all_nodes,
-                color=node_colors,
-                x=node_x,
-                y=node_y,
-                hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>',
-            ),
-            link=dict(
-                source=link_sources,
-                target=link_targets,
-                value=link_values,
-                color=link_colors,
-                hovertemplate='%{source.label} → %{target.label}<br>$%{value:.1f}B<extra></extra>',
-            ),
+            node=dict(pad=20, thickness=20, label=eq_all_nodes, color=eq_node_colors,
+                      x=eq_node_x, y=eq_node_y,
+                      hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>'),
+            link=dict(source=eq_link_sources, target=eq_link_targets, value=eq_link_values,
+                      color=eq_link_colors,
+                      hovertemplate='%{source.label} → %{target.label}<br>$%{value:.1f}B<extra></extra>'),
             textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
         ))
-        fig_sk.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            margin=dict(t=10, b=10, l=10, r=10),
-            height=500,
-        )
-        st.plotly_chart(fig_sk, width='stretch')
+        fig_sk_eq.update_layout(paper_bgcolor='rgba(0,0,0,0)',
+                                margin=dict(t=10, b=10, l=10, r=10), height=500)
+        st.plotly_chart(fig_sk_eq, width='stretch')
     else:
-        st.info("Select at least one country in the sidebar to display the Sankey.")
+        st.info("Select at least one equipment exporter in the sidebar to display the Sankey.")
+
+    st.markdown("---")
+
+    # ── Equipment Time series ──────────────────────────────────────────────
+    st.subheader("Equipment Export Trends by Country (2018–2025)")
+    df_eq_trend_global = (
+        df_global_equip[df_global_equip['reporterDesc'].isin(selected_equip_countries)]
+        .groupby(['reporterDesc','period'])['primaryValue'].sum().reset_index()
+    )
+    df_eq_trend_global['period']  = df_eq_trend_global['period'].astype(int)
+    df_eq_trend_global['value_B'] = df_eq_trend_global['primaryValue'] / 1e9
+    fig_eq_ts = px.line(
+        df_eq_trend_global, x='period', y='value_B', color='reporterDesc', markers=True,
+        labels={'value_B':'Export Value (USD Billion)','period':'Year','reporterDesc':'Country'},
+        color_discrete_map=equip_src_hex,
+    )
+    fig_eq_ts.add_vline(x=year, line_dash='dot',  line_color='#888888', opacity=0.5)
+    fig_eq_ts.add_vline(x=2022, line_dash='dash', line_color='#D85A30', opacity=0.9)
+    if not df_eq_trend_global.empty:
+        fig_eq_ts.add_annotation(
+            x=2022.05, y=df_eq_trend_global['value_B'].max()*0.95,
+            text="US Export Controls<br>Oct 2022", showarrow=False,
+            font=dict(color='#D85A30', size=11), xanchor='left'
+        )
+    fig_eq_ts.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+        legend_title='Country', hovermode='x unified',
+        xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(0,0,0,0.08)'),
+        yaxis=dict(gridcolor='rgba(0,0,0,0.08)'), margin=dict(t=20),
+    )
+    st.plotly_chart(fig_eq_ts, width='stretch')
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
