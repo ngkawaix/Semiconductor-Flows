@@ -165,6 +165,70 @@ def hex_to_rgba(hex_color, alpha=0.45):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
+# Destination node colour ramp (YlGnBu, light → dark, for right-side Sankey nodes)
+_YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
+
+def build_sankey_fig(df_flow, hex_palette):
+    """Build a Plotly Sankey figure from a reporter→partner flow DataFrame.
+
+    Nodes are spread across 5–95 % of the chart height so the top and bottom
+    nodes never clip against the figure boundary, regardless of how many rows
+    are shown. Chart height scales with the number of destination nodes.
+
+    Args:
+        df_flow: DataFrame with columns reporterDesc, partnerDesc, primaryValue
+        hex_palette: dict mapping reporter names to hex colour strings
+    """
+    src_nodes = list(df_flow['reporterDesc'].unique())
+    tgt_nodes = list(df_flow['partnerDesc'].unique())
+    all_nodes = src_nodes + tgt_nodes
+    node_idx  = {n: i for i, n in enumerate(all_nodes)}
+    n_src = len(src_nodes)
+    n_tgt = len(tgt_nodes)
+
+    def spread(n):
+        """Spread n nodes evenly between y=0.05 and y=0.95."""
+        if n == 1:
+            return [0.5]
+        return [round(0.05 + i * 0.90 / (n - 1), 3) for i in range(n)]
+
+    node_x      = [0.01] * n_src + [0.99] * n_tgt
+    node_y      = spread(n_src) + spread(n_tgt)
+    node_colors = (
+        [hex_palette.get(n, '#888888') for n in src_nodes] +
+        [_YLGNBU_DEST[i % len(_YLGNBU_DEST)] for i in range(n_tgt)]
+    )
+
+    link_sources = [node_idx[r] for r in df_flow['reporterDesc']]
+    link_targets  = [node_idx[t] for t in df_flow['partnerDesc']]
+    link_values   = (df_flow['primaryValue'] / 1e9).round(1).tolist()
+    link_colors   = [hex_to_rgba(hex_palette.get(r, '#888888')) for r in df_flow['reporterDesc']]
+
+    # Height scales with the busier (right) side; minimum 520 px
+    height = max(520, max(n_src, n_tgt) * 70 + 130)
+
+    fig = go.Figure(go.Sankey(
+        arrangement='fixed',
+        node=dict(
+            pad=18, thickness=20,
+            label=all_nodes, color=node_colors,
+            x=node_x, y=node_y,
+            hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>',
+        ),
+        link=dict(
+            source=link_sources, target=link_targets,
+            value=link_values,   color=link_colors,
+            hovertemplate='%{source.label} → %{target.label}<br>$%{value:.1f}B<extra></extra>',
+        ),
+        textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
+    ))
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(t=60, b=50, l=10, r=10),
+        height=height,
+    )
+    return fig
+
 @st.cache_data
 def build_asean_summary(df_equip, df_chips):
     df_asean = df_equip.merge(df_chips, on=['country','year'], how='outer')
@@ -366,39 +430,7 @@ with tab1:
     df_sk    = df_sk[df_sk['partnerDesc'].isin(top_dest)]
 
     if not df_sk.empty:
-        src_nodes = list(df_sk['reporterDesc'].unique())
-        tgt_nodes = list(df_sk['partnerDesc'].unique())
-        all_nodes = src_nodes + tgt_nodes
-        node_idx  = {n: i for i, n in enumerate(all_nodes)}
-        n_src = len(src_nodes);  n_tgt = len(tgt_nodes)
-        node_x = [0.01] * n_src + [0.99] * n_tgt
-        node_y = (
-            [round((i + 0.5) / n_src, 3) for i in range(n_src)] +
-            [round((i + 0.5) / n_tgt, 3) for i in range(n_tgt)]
-        )
-        ylgnbu_dest = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb',
-                       '#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
-        node_colors = (
-            [src_hex.get(n, '#888888') for n in src_nodes] +
-            [ylgnbu_dest[i % len(ylgnbu_dest)] for i in range(n_tgt)]
-        )
-        link_sources = [node_idx[r] for r in df_sk['reporterDesc']]
-        link_targets  = [node_idx[t] for t in df_sk['partnerDesc']]
-        link_values   = (df_sk['primaryValue'] / 1e9).round(1).tolist()
-        link_colors   = [hex_to_rgba(src_hex.get(r, '#888888')) for r in df_sk['reporterDesc']]
-        fig_sk = go.Figure(go.Sankey(
-            arrangement='fixed',
-            node=dict(pad=20, thickness=20, label=all_nodes, color=node_colors,
-                      x=node_x, y=node_y,
-                      hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>'),
-            link=dict(source=link_sources, target=link_targets, value=link_values,
-                      color=link_colors,
-                      hovertemplate='%{source.label} → %{target.label}<br>$%{value:.1f}B<extra></extra>'),
-            textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
-        ))
-        fig_sk.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                             margin=dict(t=40, b=20, l=10, r=10), height=620)
-        st.plotly_chart(fig_sk, width='stretch')
+        st.plotly_chart(build_sankey_fig(df_sk, src_hex), width='stretch')
     else:
         st.info("Select at least one IC exporter in the sidebar to display the Sankey.")
 
@@ -535,39 +567,7 @@ with tab1:
     df_sk_eq    = df_sk_eq[df_sk_eq['partnerDesc'].isin(top_eq_dest)]
 
     if not df_sk_eq.empty:
-        eq_src_nodes = list(df_sk_eq['reporterDesc'].unique())
-        eq_tgt_nodes = list(df_sk_eq['partnerDesc'].unique())
-        eq_all_nodes = eq_src_nodes + eq_tgt_nodes
-        eq_node_idx  = {n: i for i, n in enumerate(eq_all_nodes)}
-        eq_n_src = len(eq_src_nodes);  eq_n_tgt = len(eq_tgt_nodes)
-        eq_node_x = [0.01] * eq_n_src + [0.99] * eq_n_tgt
-        eq_node_y = (
-            [round((i + 0.5) / eq_n_src, 3) for i in range(eq_n_src)] +
-            [round((i + 0.5) / eq_n_tgt, 3) for i in range(eq_n_tgt)]
-        )
-        ylgnbu_dest = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb',
-                       '#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
-        eq_node_colors = (
-            [equip_src_hex.get(n, '#888888') for n in eq_src_nodes] +
-            [ylgnbu_dest[i % len(ylgnbu_dest)] for i in range(eq_n_tgt)]
-        )
-        eq_link_sources = [eq_node_idx[r] for r in df_sk_eq['reporterDesc']]
-        eq_link_targets  = [eq_node_idx[t] for t in df_sk_eq['partnerDesc']]
-        eq_link_values   = (df_sk_eq['primaryValue'] / 1e9).round(1).tolist()
-        eq_link_colors   = [hex_to_rgba(equip_src_hex.get(r, '#888888')) for r in df_sk_eq['reporterDesc']]
-        fig_sk_eq = go.Figure(go.Sankey(
-            arrangement='fixed',
-            node=dict(pad=20, thickness=20, label=eq_all_nodes, color=eq_node_colors,
-                      x=eq_node_x, y=eq_node_y,
-                      hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>'),
-            link=dict(source=eq_link_sources, target=eq_link_targets, value=eq_link_values,
-                      color=eq_link_colors,
-                      hovertemplate='%{source.label} → %{target.label}<br>$%{value:.1f}B<extra></extra>'),
-            textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
-        ))
-        fig_sk_eq.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                                margin=dict(t=40, b=20, l=10, r=10), height=620)
-        st.plotly_chart(fig_sk_eq, width='stretch')
+        st.plotly_chart(build_sankey_fig(df_sk_eq, equip_src_hex), width='stretch')
     else:
         st.info("Select at least one equipment exporter in the sidebar to display the Sankey.")
 
