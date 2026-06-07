@@ -133,6 +133,51 @@ def hex_to_rgba(hex_color, alpha=0.45):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
+@st.cache_data
+def build_asean_summary(df_equip, df_chips):
+    df_asean = df_equip.merge(df_chips, on=['country','year'], how='outer')
+
+    start_yr = 2018
+    end_yr   = df_asean['year'].max()
+    n_yrs    = end_yr - start_yr
+
+    def get_val(df, country, yr, col):
+        row = df[(df['country']==country) & (df['year']==yr)]
+        return row[col].values[0] if not row.empty else None
+
+    countries_asean = sorted(df_asean['country'].unique())
+    summary         = pd.DataFrame(index=countries_asean)
+
+    for col, label_s, label_e, metric in [
+        ('equip_imports', 'Equip Imports 2018 ($B)', 'Equip Imports Latest ($B)', 'Equip CAGR (%)'),
+        ('chip_exports',  'Chip Exports 2018 ($B)',  'Chip Exports Latest ($B)',  'Chip Export CAGR (%)'),
+    ]:
+        vals_s = {c: get_val(df_asean, c, start_yr, col) for c in countries_asean}
+        vals_e = {c: get_val(df_asean, c, end_yr,   col) for c in countries_asean}
+        summary[label_s] = pd.Series(vals_s) / 1e9
+        summary[label_e] = pd.Series(vals_e) / 1e9
+        summary[metric]  = pd.Series({c: cagr(vals_s[c], vals_e[c], n_yrs) for c in countries_asean})
+
+    summary['Value Chain Ratio'] = (
+        summary['Chip Exports Latest ($B)'] / summary['Equip Imports Latest ($B)']
+    ).round(2)
+
+    med_equip = summary['Equip CAGR (%)'].median()
+    med_chips = summary['Chip Export CAGR (%)'].median()
+
+    def classify(row):
+        hi_e = row['Equip CAGR (%)']      >= med_equip
+        hi_c = row['Chip Export CAGR (%)'] >= med_chips
+        if   hi_e and hi_c:  return 'Rising Hub'
+        elif hi_c:           return 'Assembly Dependent'
+        elif hi_e:           return 'Emerging'
+        else:                return 'Lagging'
+
+    summary['Status'] = summary.apply(classify, axis=1)
+    summary = summary.round(2).sort_values('Chip Export CAGR (%)', ascending=False)
+
+    return summary, med_equip, med_chips
+
 # ── Load all data ──────────────────────────────────────────────────────────
 with st.spinner("Loading UN Comtrade data — this may take a moment on first load..."):
     df_global = load_global_data()
@@ -354,46 +399,7 @@ with tab2:
         "Equipment imports proxy investment; IC exports proxy current capability."
     )
 
-    df_asean = df_equip.merge(df_chips, on=['country','year'], how='outer')
-
-    start_yr = 2018
-    end_yr   = df_asean['year'].max()
-    n_yrs    = end_yr - start_yr
-
-    def get_val(df, country, yr, col):
-        row = df[(df['country']==country) & (df['year']==yr)]
-        return row[col].values[0] if not row.empty else None
-
-    countries_asean = sorted(df_asean['country'].unique())
-    summary         = pd.DataFrame(index=countries_asean)
-
-    for col, label_s, label_e, metric in [
-        ('equip_imports', 'Equip Imports 2018 ($B)', 'Equip Imports Latest ($B)', 'Equip CAGR (%)'),
-        ('chip_exports',  'Chip Exports 2018 ($B)',  'Chip Exports Latest ($B)',  'Chip Export CAGR (%)'),
-    ]:
-        vals_s = {c: get_val(df_asean, c, start_yr, col) for c in countries_asean}
-        vals_e = {c: get_val(df_asean, c, end_yr,   col) for c in countries_asean}
-        summary[label_s] = pd.Series(vals_s) / 1e9
-        summary[label_e] = pd.Series(vals_e) / 1e9
-        summary[metric]  = pd.Series({c: cagr(vals_s[c], vals_e[c], n_yrs) for c in countries_asean})
-
-    summary['Value Chain Ratio'] = (
-        summary['Chip Exports Latest ($B)'] / summary['Equip Imports Latest ($B)']
-    ).round(2)
-
-    med_equip = summary['Equip CAGR (%)'].median()
-    med_chips = summary['Chip Export CAGR (%)'].median()
-
-    def classify(row):
-        hi_e = row['Equip CAGR (%)']      >= med_equip
-        hi_c = row['Chip Export CAGR (%)'] >= med_chips
-        if   hi_e and hi_c:  return 'Rising Hub'
-        elif hi_c:           return 'Assembly Dependent'
-        elif hi_e:           return 'Emerging'
-        else:                return 'Lagging'
-
-    summary['Status'] = summary.apply(classify, axis=1)
-    summary = summary.round(2).sort_values('Chip Export CAGR (%)', ascending=False)
+    summary, med_equip, med_chips = build_asean_summary(df_equip, df_chips)
 
     st.subheader("Value Chain Positioning Table")
 
