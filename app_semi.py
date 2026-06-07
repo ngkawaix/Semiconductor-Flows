@@ -294,11 +294,6 @@ with tab1:
         n_tgt = len(tgt_nodes)
 
         node_x = [0.01] * n_src + [0.82] * n_tgt
-        fig_sk.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            margin=dict(t=10, b=10, l=120, r=160),   # was l=10, r=10
-            height=500,
-        )
         node_y = (
             [round((i + 0.5) / n_src, 3) for i in range(n_src)] +
             [round((i + 0.5) / n_tgt, 3) for i in range(n_tgt)]
@@ -338,7 +333,7 @@ with tab1:
         ))
         fig_sk.update_layout(
             paper_bgcolor='rgba(0,0,0,0)',
-            margin=dict(t=10, b=10, l=10, r=10),
+            margin=dict(t=10, b=10, l=120, r=160),
             height=500,
         )
         st.plotly_chart(fig_sk, width='stretch')
