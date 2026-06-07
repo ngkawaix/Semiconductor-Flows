@@ -76,7 +76,36 @@ def load_asean_chips():
     df['year'] = df['year'].astype(int)
     return df
 
-# ── Constants ──────────────────────────────────────────────────────────────
+# ── Unified colour palette (YlGnBu-inspired, muted and professional) ───────
+# Hex colours used across all Plotly charts and Sankey
+src_hex = {
+    'Taiwan':        '#1d91c0',
+    'Rep. of Korea': '#41b6c4',
+    'China':         '#D85A30',
+    'Netherlands':   '#7fcdbb',
+    'USA':           '#225ea8',
+    'Japan':         '#c7e9b4',
+}
+
+# RGBA for pydeck ArcLayer (converted from src_hex)
+colour_map = {
+    'Taiwan':        [29,  145, 192, 210],
+    'Rep. of Korea': [65,  182, 196, 210],
+    'China':         [216,  90,  48, 210],
+    'Netherlands':   [127, 205, 187, 210],
+    'USA':           [34,   94, 168, 210],
+    'Japan':         [199, 233, 180, 210],
+}
+
+# YlGnBu status colours for ASEAN table
+status_colours = {
+    'Rising Hub':         '#1d91c0',
+    'Assembly Dependent': '#41b6c4',
+    'Emerging':           '#7fcdbb',
+    'Lagging':            '#c7e9b4',
+}
+
+# ── Helpers ────────────────────────────────────────────────────────────────
 country_coords = {
     'CHN':(35.8617,104.1954),'TWN':(23.6978,120.9605),'KOR':(35.9078,127.7669),
     'NLD':(52.1326,5.2913),  'USA':(37.0902,-95.7129), 'JPN':(36.2048,138.2529),
@@ -86,28 +115,6 @@ country_coords = {
     'THA':(15.8700,100.9925),'IDN':(-0.7893,113.9213),'IRL':(53.1424,-7.6921),
     'BRA':(-14.235,-51.9253),'AUS':(-25.274,133.7751), 'CZE':(49.8175,15.4730),
     'ISR':(31.0461,34.8516), 'POL':(51.9194,19.1451), 'SAU':(23.8859,45.0792),
-}
-
-colour_map = {
-    'Taiwan':       [0,180,255,200], 'Rep. of Korea':[0,255,140,200],
-    'China':        [255,80,80,200], 'Netherlands':  [255,165,0,200],
-    'USA':          [180,0,255,200], 'Japan':        [255,255,0,200],
-}
-
-hex_colours = {c:'#{:02x}{:02x}{:02x}'.format(*v[:3]) for c,v in colour_map.items()}
-
-status_colours = {
-    'Rising Hub':'#00FF8C','Assembly Dependent':'#FFD700',
-    'Emerging':  '#00B4FF','Lagging':           '#FF5050',
-}
-
-src_hex = {
-    'Taiwan':        '#378ADD',
-    'Rep. of Korea': '#1D9E75',
-    'China':         '#D85A30',
-    'Netherlands':   '#BA7517',
-    'Japan':         '#7F77DD',
-    'USA':           '#888780',
 }
 
 def fmt(val):
@@ -121,8 +128,7 @@ def cagr(start, end, n):
         return round(((end/start)**(1/n)-1)*100, 1)
     return None
 
-def hex_to_rgba(hex_color, alpha=0.35):
-    """Convert #RRGGBB to rgba(r,g,b,alpha) for Plotly link colours."""
+def hex_to_rgba(hex_color, alpha=0.45):
     h = hex_color.lstrip('#')
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
@@ -139,7 +145,8 @@ st.sidebar.markdown("### Filter Countries")
 st.sidebar.caption("Applies to the Global Supply Chain tab.")
 
 selected_countries = []
-for country, hex_c in hex_colours.items():
+for country, hex_c in src_hex.items():
+    label = f'<span style="color:{hex_c}; font-size:16px">■</span> {country}'
     if st.sidebar.checkbox(country, value=True, key=f"toggle_{country}"):
         selected_countries.append(country)
 
@@ -164,7 +171,6 @@ with tab1:
         "Arc width proportional to export value. Data: UN Comtrade."
     )
 
-    # ── Prepare arc data ───────────────────────────────────────────────────
     coords_df = (
         pd.DataFrame.from_dict(country_coords, orient='index', columns=['lat','lon'])
         .reset_index().rename(columns={'index':'ISO'})
@@ -187,10 +193,8 @@ with tab1:
         ['primaryValue'].sum().reset_index()
     )
 
-    # ── Year slider ────────────────────────────────────────────────────────
     year = st.slider("Select year", 2018, 2024, 2023)
 
-    # ── Filter ─────────────────────────────────────────────────────────────
     df_year     = df_arcs[(df_arcs['period']==str(year)) & (df_arcs['reporterDesc'].isin(selected_countries))].copy()
     df_year_all = df_global[df_global['period']==str(year)]
     df_prev_all = df_global[df_global['period']==str(year-1)] if year > 2018 else None
@@ -201,14 +205,12 @@ with tab1:
     china_share  = df_year_all[df_year_all['reporterDesc']=='China']['primaryValue'].sum()  / total_cur * 100
     yoy          = f"{((total_cur-total_prev)/total_prev*100):+.1f}% YoY" if total_prev else None
 
-    # ── Metrics ────────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
     c1.metric("Total IC Exports",  fmt(total_cur),        delta=yoy)
     c2.metric("Taiwan's Share",    f"{taiwan_share:.1f}%")
     c3.metric("China's Share",     f"{china_share:.1f}%")
     st.markdown("---")
 
-    # ── Arc map ────────────────────────────────────────────────────────────
     if selected_countries and not df_year.empty:
         df_year['color']     = df_year['reporterDesc'].map(colour_map)
         df_year['width']     = (df_year['primaryValue'] / df_year['primaryValue'].max() * 25).clip(lower=2)
@@ -243,31 +245,30 @@ with tab1:
     fig_ts = px.line(
         df_trend, x='period', y='value_B', color='reporterDesc', markers=True,
         labels={'value_B':'Export Value (USD Billion)','period':'Year','reporterDesc':'Country'},
-        color_discrete_map=hex_colours,
+        color_discrete_map=src_hex,
     )
-    fig_ts.add_vline(x=year, line_dash='dot',  line_color='white',   opacity=0.4)
-    fig_ts.add_vline(x=2022, line_dash='dash', line_color='#FF4444', opacity=0.8)
+    fig_ts.add_vline(x=year, line_dash='dot',  line_color='#888888', opacity=0.5)
+    fig_ts.add_vline(x=2022, line_dash='dash', line_color='#D85A30', opacity=0.9)
     if not df_trend.empty:
         fig_ts.add_annotation(
             x=2022.05, y=df_trend['value_B'].max()*0.95,
             text="US Export Controls<br>Oct 2022", showarrow=False,
-            font=dict(color='#FF4444', size=11), xanchor='left'
+            font=dict(color='#D85A30', size=11), xanchor='left'
         )
     fig_ts.update_layout(
         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-        font_color='white', legend_title='Country', hovermode='x unified',
-        xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(255,255,255,0.1)'),
-        yaxis=dict(gridcolor='rgba(255,255,255,0.1)'), margin=dict(t=20),
+        legend_title='Country', hovermode='x unified',
+        xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(0,0,0,0.08)'),
+        yaxis=dict(gridcolor='rgba(0,0,0,0.08)'), margin=dict(t=20),
     )
     st.plotly_chart(fig_ts, width='stretch')
 
     st.markdown("---")
 
-    # ── Sankey: producers → destinations ──────────────────────────────────
-    st.markdown("---")
+    # ── Sankey ─────────────────────────────────────────────────────────────
     st.subheader("Supply chain flow — producers to destinations")
 
-    producer_set = set(colour_map.keys())  # Taiwan, Korea, China, etc.
+    producer_set = set(colour_map.keys())
 
     df_sk = (
         df_global[df_global['period'] == str(year)]
@@ -276,7 +277,7 @@ with tab1:
     )
     df_sk = df_sk[
         df_sk['reporterDesc'].isin(selected_countries) &
-        ~df_sk['partnerDesc'].isin(producer_set)        # exclude producer-to-producer flows
+        ~df_sk['partnerDesc'].isin(producer_set)
     ]
 
     top_dest = df_sk.groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
@@ -292,23 +293,29 @@ with tab1:
         n_src = len(src_nodes)
         n_tgt = len(tgt_nodes)
 
-        # Force left/right positions for clean layout
         node_x = [0.01] * n_src + [0.99] * n_tgt
         node_y = (
             [round((i + 0.5) / n_src, 3) for i in range(n_src)] +
             [round((i + 0.5) / n_tgt, 3) for i in range(n_tgt)]
         )
 
-        node_colors  = [src_hex.get(n, '#A0A0A0' if n in hub_set else '#606060') for n in all_nodes]
+        # Destination nodes: gradient from YlGnBu by rank
+        ylgnbu_dest = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb',
+                       '#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
+        node_colors = (
+            [src_hex.get(n, '#888888') for n in src_nodes] +
+            [ylgnbu_dest[i % len(ylgnbu_dest)] for i in range(n_tgt)]
+        )
+
         link_sources = [node_idx[r] for r in df_sk['reporterDesc']]
         link_targets  = [node_idx[t] for t in df_sk['partnerDesc']]
         link_values   = (df_sk['primaryValue'] / 1e9).round(1).tolist()
-        link_colors   = [hex_to_rgba(src_hex.get(r, '#888780')) for r in df_sk['reporterDesc']]
+        link_colors   = [hex_to_rgba(src_hex.get(r, '#888888')) for r in df_sk['reporterDesc']]
 
         fig_sk = go.Figure(go.Sankey(
-            arrangement='fixed',          # respect manual x/y positions
+            arrangement='fixed',
             node=dict(
-                pad=20, thickness=18,
+                pad=20, thickness=20,
                 label=all_nodes,
                 color=node_colors,
                 x=node_x,
@@ -321,11 +328,11 @@ with tab1:
                 value=link_values,
                 color=link_colors,
                 hovertemplate='%{source.label} → %{target.label}<br>$%{value:.1f}B<extra></extra>',
-            )
+            ),
+            textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
         ))
         fig_sk.update_layout(
             paper_bgcolor='rgba(0,0,0,0)',
-            font_color='white',
             margin=dict(t=10, b=10, l=10, r=10),
             height=500,
         )
@@ -344,7 +351,6 @@ with tab2:
         "Equipment imports proxy investment; IC exports proxy current capability."
     )
 
-    # ── Build summary table ────────────────────────────────────────────────
     df_asean = df_equip.merge(df_chips, on=['country','year'], how='outer')
 
     start_yr = 2018
@@ -386,13 +392,16 @@ with tab2:
     summary['Status'] = summary.apply(classify, axis=1)
     summary = summary.round(2).sort_values('Chip Export CAGR (%)', ascending=False)
 
-    # ── Styled table ───────────────────────────────────────────────────────
     st.subheader("Value Chain Positioning Table")
 
     def colour_status(val):
-        c = {'Rising Hub':'#00FF8C','Assembly Dependent':'#FFD700',
-             'Emerging':'#00B4FF','Lagging':'#FF5050'}.get(val,'')
-        return f'background-color:{c}; color:black; font-weight:bold' if c else ''
+        c = {
+            'Rising Hub':         '#1d91c0',
+            'Assembly Dependent': '#41b6c4',
+            'Emerging':           '#7fcdbb',
+            'Lagging':            '#c7e9b4',
+        }.get(val, '')
+        return f'background-color:{c}; color:#0c2c84; font-weight:600' if c else ''
 
     styled = (
         summary.style
@@ -411,7 +420,6 @@ with tab2:
 
     st.markdown("---")
 
-    # ── 2x2 scatter plot ───────────────────────────────────────────────────
     st.subheader("Value Chain Quadrant Analysis")
     st.caption(
         "X-axis: equipment import CAGR (investment proxy). "
@@ -431,69 +439,75 @@ with tab2:
             text=sub['country'], textposition='top center',
             marker=dict(
                 size=(sub['Chip Exports Latest ($B)'].fillna(1).clip(lower=1)*3),
-                color=colour, opacity=0.85,
-                line=dict(width=1, color='white')
+                color=colour, opacity=0.9,
+                line=dict(width=1.5, color='#225ea8')
             )
         ))
 
-    fig_scatter.add_hline(y=med_chips, line_dash='dash', line_color='white', opacity=0.3)
-    fig_scatter.add_vline(x=med_equip, line_dash='dash', line_color='white', opacity=0.3)
+    fig_scatter.add_hline(y=med_chips, line_dash='dash', line_color='#888888', opacity=0.4)
+    fig_scatter.add_vline(x=med_equip, line_dash='dash', line_color='#888888', opacity=0.4)
 
     for label, xpos, ypos, colour in [
-        ('Rising Hub',         0.95, 0.95, '#00FF8C'),
-        ('Assembly Dependent', 0.05, 0.95, '#FFD700'),
-        ('Emerging',           0.95, 0.05, '#00B4FF'),
-        ('Lagging',            0.05, 0.05, '#FF5050'),
+        ('Rising Hub',         0.95, 0.95, '#1d91c0'),
+        ('Assembly Dependent', 0.05, 0.95, '#41b6c4'),
+        ('Emerging',           0.95, 0.05, '#7fcdbb'),
+        ('Lagging',            0.05, 0.05, '#c7e9b4'),
     ]:
         fig_scatter.add_annotation(
             xref='paper', yref='paper', x=xpos, y=ypos,
             text=label, showarrow=False,
-            font=dict(color=colour, size=11), opacity=0.5
+            font=dict(color=colour, size=12), opacity=0.7
         )
 
     fig_scatter.update_layout(
         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-        font_color='white', legend_title='Status',
-        xaxis=dict(title='Equipment Import CAGR (%)', gridcolor='rgba(255,255,255,0.1)', zeroline=False),
-        yaxis=dict(title='IC Export CAGR (%)',        gridcolor='rgba(255,255,255,0.1)', zeroline=False),
+        legend_title='Status',
+        xaxis=dict(title='Equipment Import CAGR (%)', gridcolor='rgba(0,0,0,0.08)', zeroline=False),
+        yaxis=dict(title='IC Export CAGR (%)',        gridcolor='rgba(0,0,0,0.08)', zeroline=False),
         margin=dict(t=20),
     )
     st.plotly_chart(fig_scatter, width='stretch')
 
     st.markdown("---")
 
-    # ── Trend lines ────────────────────────────────────────────────────────
     st.subheader("Equipment Imports vs IC Exports Over Time")
     col_a, col_b = st.columns(2)
 
+    # Shared YlGnBu colour sequence for ASEAN countries
+    ylgnbu_seq = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1']
+    asean_countries = sorted(df_equip['country'].unique())
+    asean_colours   = {c: ylgnbu_seq[i % len(ylgnbu_seq)] for i, c in enumerate(asean_countries)}
+
     with col_a:
         st.markdown("**Semiconductor Equipment Imports (HS 8486)**")
-        df_eq_trend          = df_equip.copy()
+        df_eq_trend            = df_equip.copy()
         df_eq_trend['value_B'] = df_eq_trend['equip_imports'] / 1e9
         fig_eq = px.line(
             df_eq_trend, x='year', y='value_B', color='country', markers=True,
-            labels={'value_B':'USD Billion','year':'Year','country':'Country'}
+            labels={'value_B':'USD Billion','year':'Year','country':'Country'},
+            color_discrete_map=asean_colours,
         )
         fig_eq.update_layout(
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-            font_color='white', margin=dict(t=10),
-            xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(255,255,255,0.1)'),
-            yaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
+            margin=dict(t=10),
+            xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(0,0,0,0.08)'),
+            yaxis=dict(gridcolor='rgba(0,0,0,0.08)'),
         )
         st.plotly_chart(fig_eq, width='stretch')
 
     with col_b:
         st.markdown("**IC Exports (HS 8542)**")
-        df_ch_trend          = df_chips.copy()
+        df_ch_trend            = df_chips.copy()
         df_ch_trend['value_B'] = df_ch_trend['chip_exports'] / 1e9
         fig_ch = px.line(
             df_ch_trend, x='year', y='value_B', color='country', markers=True,
-            labels={'value_B':'USD Billion','year':'Year','country':'Country'}
+            labels={'value_B':'USD Billion','year':'Year','country':'Country'},
+            color_discrete_map=asean_colours,
         )
         fig_ch.update_layout(
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-            font_color='white', margin=dict(t=10),
-            xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(255,255,255,0.1)'),
-            yaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
+            margin=dict(t=10),
+            xaxis=dict(tickmode='linear', dtick=1, gridcolor='rgba(0,0,0,0.08)'),
+            yaxis=dict(gridcolor='rgba(0,0,0,0.08)'),
         )
         st.plotly_chart(fig_ch, width='stretch')
