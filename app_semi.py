@@ -138,25 +138,34 @@ def build_asean_summary(df_equip, df_chips):
     df_asean = df_equip.merge(df_chips, on=['country','year'], how='outer')
 
     start_yr = 2018
-    end_yr   = df_asean['year'].max()
-    n_yrs    = end_yr - start_yr
 
     def get_val(df, country, yr, col):
         row = df[(df['country']==country) & (df['year']==yr)]
         return row[col].values[0] if not row.empty else None
 
     countries_asean = sorted(df_asean['country'].unique())
-    summary         = pd.DataFrame(index=countries_asean)
+
+    # Use each country's own latest reported year — avoids None values when
+    # some countries have filed 2025 data and others haven't yet
+    latest_yr = {
+        c: int(df_asean[df_asean['country'] == c]['year'].max())
+        for c in countries_asean
+    }
+
+    summary = pd.DataFrame(index=countries_asean)
 
     for col, label_s, label_e, metric in [
         ('equip_imports', 'Equip Imports 2018 ($B)', 'Equip Imports Latest ($B)', 'Equip CAGR (%)'),
         ('chip_exports',  'Chip Exports 2018 ($B)',  'Chip Exports Latest ($B)',  'Chip Export CAGR (%)'),
     ]:
-        vals_s = {c: get_val(df_asean, c, start_yr, col) for c in countries_asean}
-        vals_e = {c: get_val(df_asean, c, end_yr,   col) for c in countries_asean}
+        vals_s = {c: get_val(df_asean, c, start_yr,     col) for c in countries_asean}
+        vals_e = {c: get_val(df_asean, c, latest_yr[c], col) for c in countries_asean}
         summary[label_s] = pd.Series(vals_s) / 1e9
         summary[label_e] = pd.Series(vals_e) / 1e9
-        summary[metric]  = pd.Series({c: cagr(vals_s[c], vals_e[c], n_yrs) for c in countries_asean})
+        summary[metric]  = pd.Series({
+            c: cagr(vals_s[c], vals_e[c], latest_yr[c] - start_yr)
+            for c in countries_asean
+        })
 
     summary['Value Chain Ratio'] = (
         summary['Chip Exports Latest ($B)'] / summary['Equip Imports Latest ($B)']
@@ -447,7 +456,7 @@ with tab2:
             mode='markers+text', name=status,
             text=sub['country'], textposition='top center',
             marker=dict(
-                size=(sub['Chip Exports Latest ($B)'].fillna(1).clip(lower=1)*3),
+                size=(sub['Chip Exports Latest ($B)'].fillna(1).clip(lower=1) ** 0.5 * 8),
                 color=colour, opacity=0.9,
                 line=dict(width=1.5, color='#225ea8')
             )
