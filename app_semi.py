@@ -264,26 +264,40 @@ with tab1:
     st.markdown("---")
 
     # ── Sankey: producers → destinations ──────────────────────────────────
+    st.markdown("---")
     st.subheader("Supply chain flow — producers to destinations")
+
+    producer_set = set(colour_map.keys())  # Taiwan, Korea, China, etc.
 
     df_sk = (
         df_global[df_global['period'] == str(year)]
         .groupby(['reporterDesc', 'partnerDesc'])['primaryValue']
         .sum().reset_index()
     )
-
-    top_dest = df_sk.groupby('partnerDesc')['primaryValue'].sum().nlargest(12).index
-    df_sk    = df_sk[
-        df_sk['partnerDesc'].isin(top_dest) &
-        df_sk['reporterDesc'].isin(selected_countries)
+    df_sk = df_sk[
+        df_sk['reporterDesc'].isin(selected_countries) &
+        ~df_sk['partnerDesc'].isin(producer_set)        # exclude producer-to-producer flows
     ]
 
+    top_dest = df_sk.groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+    df_sk    = df_sk[df_sk['partnerDesc'].isin(top_dest)]
+
     if not df_sk.empty:
-        hub_set    = {'China, Hong Kong SAR', 'Singapore', 'Malaysia'}
-        src_nodes  = list(df_sk['reporterDesc'].unique())
-        tgt_nodes  = [t for t in df_sk['partnerDesc'].unique() if t not in src_nodes]
-        all_nodes  = src_nodes + tgt_nodes
-        node_idx   = {n: i for i, n in enumerate(all_nodes)}
+        hub_set   = {'China, Hong Kong SAR', 'Singapore', 'Malaysia'}
+        src_nodes = list(df_sk['reporterDesc'].unique())
+        tgt_nodes = list(df_sk['partnerDesc'].unique())
+        all_nodes = src_nodes + tgt_nodes
+        node_idx  = {n: i for i, n in enumerate(all_nodes)}
+
+        n_src = len(src_nodes)
+        n_tgt = len(tgt_nodes)
+
+        # Force left/right positions for clean layout
+        node_x = [0.01] * n_src + [0.99] * n_tgt
+        node_y = (
+            [round((i + 0.5) / n_src, 3) for i in range(n_src)] +
+            [round((i + 0.5) / n_tgt, 3) for i in range(n_tgt)]
+        )
 
         node_colors  = [src_hex.get(n, '#A0A0A0' if n in hub_set else '#606060') for n in all_nodes]
         link_sources = [node_idx[r] for r in df_sk['reporterDesc']]
@@ -292,11 +306,13 @@ with tab1:
         link_colors   = [hex_to_rgba(src_hex.get(r, '#888780')) for r in df_sk['reporterDesc']]
 
         fig_sk = go.Figure(go.Sankey(
-            arrangement='snap',
+            arrangement='fixed',          # respect manual x/y positions
             node=dict(
-                pad=15, thickness=18,
+                pad=20, thickness=18,
                 label=all_nodes,
                 color=node_colors,
+                x=node_x,
+                y=node_y,
                 hovertemplate='%{label}<br>$%{value:.1f}B<extra></extra>',
             ),
             link=dict(
@@ -311,7 +327,7 @@ with tab1:
             paper_bgcolor='rgba(0,0,0,0)',
             font_color='white',
             margin=dict(t=10, b=10, l=10, r=10),
-            height=480,
+            height=500,
         )
         st.plotly_chart(fig_sk, width='stretch')
     else:
