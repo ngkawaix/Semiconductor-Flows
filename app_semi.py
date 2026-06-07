@@ -97,43 +97,37 @@ def load_asean_chips():
     df['year'] = df['year'].astype(int)
     return df
 
-# ── Unified colour palette (YlGnBu-inspired, muted and professional) ───────
-# Hex colours used across all Plotly charts and Sankey
-src_hex = {
+# ── Canonical colour palette (YlGnBu-inspired, muted and professional) ──────
+# Single source of truth for every country that appears in either arc map,
+# Sankey, or time series. Add new countries here only.
+country_hex = {
     'Taiwan':        '#1d91c0',
     'Rep. of Korea': '#41b6c4',
     'China':         '#D85A30',
     'Netherlands':   '#7fcdbb',
     'USA':           '#225ea8',
     'Japan':         '#c7e9b4',
+    'Germany':       '#9e9ac8',
 }
 
-# RGBA for pydeck ArcLayer (converted from src_hex)
-colour_map = {
+# RGBA equivalent for pydeck ArcLayer
+country_rgba = {
     'Taiwan':        [29,  145, 192, 210],
     'Rep. of Korea': [65,  182, 196, 210],
     'China':         [216,  90,  48, 210],
     'Netherlands':   [127, 205, 187, 210],
     'USA':           [34,   94, 168, 210],
     'Japan':         [199, 233, 180, 210],
-}
-
-# Equipment producer colours (HS 8486) — Germany added as muted purple
-equip_src_hex = {
-    'Netherlands':   '#7fcdbb',
-    'USA':           '#225ea8',
-    'Japan':         '#c7e9b4',
-    'Germany':       '#9e9ac8',
-    'Rep. of Korea': '#41b6c4',
-}
-
-equip_colour_map = {
-    'Netherlands':   [127, 205, 187, 210],
-    'USA':           [34,   94, 168, 210],
-    'Japan':         [199, 233, 180, 210],
     'Germany':       [158, 154, 200, 210],
-    'Rep. of Korea': [65,  182, 196, 210],
 }
+
+# Ordered lists that define each section's exporter set (order = Sankey row order)
+IC_EXPORTERS    = ['Taiwan', 'Rep. of Korea', 'China', 'Netherlands', 'USA', 'Japan']
+EQUIP_EXPORTERS = ['Netherlands', 'USA', 'Japan', 'Germany', 'Rep. of Korea']
+
+# Hex subsets for Plotly color_discrete_map and Sankey node colours
+src_hex       = {k: country_hex[k] for k in IC_EXPORTERS}
+equip_src_hex = {k: country_hex[k] for k in EQUIP_EXPORTERS}
 
 # YlGnBu status colours for ASEAN table
 status_colours = {
@@ -266,7 +260,7 @@ st.sidebar.markdown(
 )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["🌍  Global Supply Chain", "🌏  ASEAN Value Chain"])
+tab1, tab2 = st.tabs(["🌍  Global Supply Chain", "🏭  ASEAN Value Chain"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — GLOBAL SUPPLY CHAIN
@@ -328,7 +322,7 @@ with tab1:
     st.markdown("---")
 
     if selected_countries and not df_year.empty:
-        df_year['color']     = df_year['reporterDesc'].map(colour_map)
+        df_year['color']     = df_year['reporterDesc'].map(country_rgba)
         df_year['width']     = (df_year['primaryValue'] / df_year['primaryValue'].max() * 25).clip(lower=2)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
@@ -358,7 +352,7 @@ with tab1:
         "Right: their top 8 importing countries for the selected year (excluding other exporters)."
     )
 
-    producer_set = set(colour_map.keys())
+    producer_set = set(IC_EXPORTERS)
     df_sk = (
         df_global[df_global['period'] == str(year)]
         .groupby(['reporterDesc', 'partnerDesc'])['primaryValue']
@@ -484,7 +478,7 @@ with tab1:
         / total_eq_cur * 100
     ) if total_eq_cur > 0 else 0
 
-    producer_set_eq = set(equip_colour_map.keys())
+    producer_set_eq = set(EQUIP_EXPORTERS)
     top_eq_dest_ser = (
         df_eq_year_all[~df_eq_year_all['partnerDesc'].isin(producer_set_eq)]
         .groupby('partnerDesc')['primaryValue'].sum()
@@ -498,7 +492,7 @@ with tab1:
     st.markdown("---")
 
     if selected_equip_countries and not df_eq_year.empty:
-        df_eq_year['color']     = df_eq_year['reporterDesc'].map(equip_colour_map)
+        df_eq_year['color']     = df_eq_year['reporterDesc'].map(country_rgba)
         df_eq_year['width']     = (df_eq_year['primaryValue'] / df_eq_year['primaryValue'].max() * 25).clip(lower=2)
         df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
