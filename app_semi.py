@@ -15,7 +15,7 @@ st.set_page_config(
 @st.cache_data
 def load_global_data():
     key   = st.secrets["COMTRADE_KEY"]
-    years = ','.join(str(y) for y in range(2018, 2025))
+    years = ','.join(str(y) for y in range(2018, 2026))
     df    = comtrade.getFinalData(
         key, typeCode='C', freqCode='A', clCode='HS', period=years,
         reporterCode='156,490,410,528,842,392',
@@ -35,7 +35,7 @@ def load_global_data():
 @st.cache_data
 def load_asean_equip():
     key   = st.secrets["COMTRADE_KEY"]
-    years = ','.join(str(y) for y in range(2018, 2025))
+    years = ','.join(str(y) for y in range(2018, 2026))
     df    = comtrade.getFinalData(
         key, typeCode='C', freqCode='A', clCode='HS', period=years,
         reporterCode='702,458,704,764,608,360',
@@ -57,7 +57,7 @@ def load_asean_equip():
 @st.cache_data
 def load_asean_chips():
     key   = st.secrets["COMTRADE_KEY"]
-    years = ','.join(str(y) for y in range(2018, 2025))
+    years = ','.join(str(y) for y in range(2018, 2026))
     df    = comtrade.getFinalData(
         key, typeCode='C', freqCode='A', clCode='HS', period=years,
         reporterCode='702,458,704,764,608,360',
@@ -154,7 +154,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown(
     "**Source:** UN Comtrade  \n"
     "**Products:** HS 8486 (equipment), HS 8542 (ICs)  \n"
-    "**Coverage:** 2018–2024  \n"
+    "**Coverage:** 2018–2025  \n"
     "**Flow:** Exports (global), Imports/Exports (ASEAN)"
 )
 
@@ -167,7 +167,7 @@ tab1, tab2 = st.tabs(["🌍  Global Supply Chain", "🌏  ASEAN Value Chain"])
 with tab1:
     st.title("Global Semiconductor Trade Flows (HS 8542)")
     st.caption(
-        "Integrated circuit exports from major producing nations, 2018–2024. "
+        "Integrated circuit exports from major producing nations, 2018–2025. "
         "Arc width proportional to export value. Data: UN Comtrade."
     )
 
@@ -193,7 +193,7 @@ with tab1:
         ['primaryValue'].sum().reset_index()
     )
 
-    year = st.slider("Select year", 2018, 2024, 2023)
+    year = st.slider("Select year", 2018, 2025, 2024)
 
     df_year     = df_arcs[(df_arcs['period']==str(year)) & (df_arcs['reporterDesc'].isin(selected_countries))].copy()
     df_year_all = df_global[df_global['period']==str(year)]
@@ -234,7 +234,7 @@ with tab1:
     st.markdown("---")
 
     # ── Time series ────────────────────────────────────────────────────────
-    st.subheader("IC Export Trends by Country (2018–2024)")
+    st.subheader("IC Export Trends by Country (2018–2025)")
     df_trend = (
         df_global[df_global['reporterDesc'].isin(selected_countries)]
         .groupby(['reporterDesc','period'])['primaryValue'].sum().reset_index()
@@ -293,7 +293,12 @@ with tab1:
         n_src = len(src_nodes)
         n_tgt = len(tgt_nodes)
 
-        node_x = [0.01] * n_src + [0.99] * n_tgt
+        node_x = [0.01] * n_src + [0.82] * n_tgt
+        fig_sk.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            margin=dict(t=10, b=10, l=120, r=160),   # was l=10, r=10
+            height=500,
+        )
         node_y = (
             [round((i + 0.5) / n_src, 3) for i in range(n_src)] +
             [round((i + 0.5) / n_tgt, 3) for i in range(n_tgt)]
