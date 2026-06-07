@@ -34,7 +34,7 @@ def load_global_data():
 
 @st.cache_data
 def load_global_equip_data():
-    """HS 8486 — semiconductor equipment exports from the five major tool makers."""
+    """HS 8486: semiconductor equipment exports from the five major tool makers."""
     key   = st.secrets["COMTRADE_KEY"]
     years = ','.join(str(y) for y in range(2018, 2026))
     df    = comtrade.getFinalData(
@@ -226,7 +226,7 @@ def build_asean_summary(df_equip, df_chips):
     return summary, med_equip, med_chips
 
 # ── Load all data ──────────────────────────────────────────────────────────
-with st.spinner("Loading UN Comtrade data — this may take a moment on first load..."):
+with st.spinner("Loading UN Comtrade data. This may take a moment on first load..."):
     df_global       = load_global_data()
     df_global_equip = load_global_equip_data()
     df_equip        = load_asean_equip()
@@ -234,7 +234,7 @@ with st.spinner("Loading UN Comtrade data — this may take a moment on first lo
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 st.sidebar.title("Controls")
-st.sidebar.markdown("### IC Producers")
+st.sidebar.markdown("### IC Exporters")
 st.sidebar.caption("Applies to the IC section of Tab 1.")
 
 selected_countries = []
@@ -283,9 +283,16 @@ with tab1:
     # ══ SECTION 1 — INTEGRATED CIRCUITS (HS 8542) ════════════════════════════
     st.header("🔬 Integrated Circuits (HS 8542)")
     st.caption(
-        "Exports from major IC-producing nations. "
-        "Left = exporters, right = destination markets. "
+        "Exports from major IC-exporting nations. "
+        "Left = exporters, right = importers. "
         "Arc width proportional to export value. Data: UN Comtrade."
+    )
+    st.markdown(
+        "> **Why these countries?** These six nations account for the majority of global IC exports. "
+        "**Taiwan** (TSMC, MediaTek), **South Korea** (Samsung Electronics, SK Hynix), "
+        "**China** (SMIC, Hua Hong Semiconductor), **USA** (Intel, Texas Instruments), "
+        "**Japan** (Renesas, Kioxia, Sony Semiconductor), "
+        "**Netherlands** (NXP Semiconductors)."
     )
 
     df_arcs = (
@@ -340,15 +347,15 @@ with tab1:
             key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}"
         )
     else:
-        st.info("Select at least one IC producer in the sidebar to display the map.")
+        st.info("Select at least one IC exporter in the sidebar to display the map.")
 
     st.markdown("---")
 
     # ── IC Sankey ──────────────────────────────────────────────────────────
-    st.subheader("Supply chain flow — IC producers to destinations")
+    st.subheader("IC exporters to importers")
     st.caption(
-        "Left: 6 major IC-producing nations. "
-        "Right: their top 8 export destinations for the selected year (excluding producers)."
+        "Left: 6 major IC-exporting nations. "
+        "Right: their top 8 importing countries for the selected year (excluding other exporters)."
     )
 
     producer_set = set(colour_map.keys())
@@ -396,10 +403,10 @@ with tab1:
             textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
         ))
         fig_sk.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                             margin=dict(t=10, b=10, l=10, r=10), height=500)
+                             margin=dict(t=40, b=20, l=10, r=10), height=620)
         st.plotly_chart(fig_sk, width='stretch')
     else:
-        st.info("Select at least one IC producer in the sidebar to display the Sankey.")
+        st.info("Select at least one IC exporter in the sidebar to display the Sankey.")
 
     st.markdown("---")
 
@@ -437,8 +444,16 @@ with tab1:
     st.header("⚙️ Semiconductor Equipment (HS 8486)")
     st.caption(
         "Exports of lithography machines (EUV/DUV), etch tools, deposition systems, and metrology. "
-        "Left = equipment exporters, right = fab nations buying equipment. "
+        "Left = exporters, right = importers. "
         "Data: UN Comtrade."
+    )
+    st.markdown(
+        "> **Why these countries?** These five nations control the critical tooling that every chip fab depends on. "
+        "**Netherlands** (ASML, sole maker of EUV lithography), "
+        "**USA** (Applied Materials, Lam Research, KLA), "
+        "**Japan** (Tokyo Electron, Nikon, Canon, Advantest), "
+        "**Germany** (Carl Zeiss, whose optics are inside every ASML machine; Aixtron), "
+        "**South Korea** (Samsung's equipment division, Jusung Engineering)."
     )
 
     df_arcs_eq = (
@@ -507,10 +522,10 @@ with tab1:
     st.markdown("---")
 
     # ── Equipment Sankey ───────────────────────────────────────────────────
-    st.subheader("Supply chain flow — equipment makers to fab nations")
+    st.subheader("Equipment exporters to importers")
     st.caption(
         "Left: 5 major equipment-exporting nations. "
-        "Right: their top 8 destination markets for the selected year (excluding equipment producers)."
+        "Right: their top 8 importing countries for the selected year (excluding other exporters)."
     )
 
     df_sk_eq = (
@@ -557,7 +572,7 @@ with tab1:
             textfont=dict(size=13, color='#1a1a1a', family='sans-serif'),
         ))
         fig_sk_eq.update_layout(paper_bgcolor='rgba(0,0,0,0)',
-                                margin=dict(t=10, b=10, l=10, r=10), height=500)
+                                margin=dict(t=40, b=20, l=10, r=10), height=620)
         st.plotly_chart(fig_sk_eq, width='stretch')
     else:
         st.info("Select at least one equipment exporter in the sidebar to display the Sankey.")
