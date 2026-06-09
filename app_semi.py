@@ -875,11 +875,7 @@ with tab3:
     fig_atlas.update_layout(
         title=dict(
             text=(
-                "Semiconductor Supply Chain — FY2024/25"
-                "<br><span style='font-size:13px;color:#64748b'>"
-                "Link colour = source node category  ·  "
-                "Hover nodes/links for citations and segment data"
-                "</span>"
+                "Semiconductor Supply Chain - FY2024/25"
             ),
             font=dict(color="#0f172a", size=18, family="Arial Black, Arial"),
             x=0.5, xanchor="center",
