@@ -800,7 +800,7 @@ with tab3:
         title = str(meta_sc.loc[n, "annotation_title"]).strip()
         src   = str(meta_sc.loc[n, "annotation_source"]).strip()
         rev   = DISCLOSED_REVENUE.get(n)
-        base  = f"<b>{n}</b><br><span style='color:#94a3b8'>{cat}</span>"
+        base  = f"<b>{n}</b><br><span style='color:#64748b'>{cat}</span>"
         if rev:
             base += f"<br>Disclosed revenue: <b>${rev:.1f}B</b>"
         if ann and ann != "nan":
@@ -814,18 +814,45 @@ with tab3:
     node_labels_sc     = [node_label_sc(n) for n in nodes_sc]
     node_hover_text_sc = [node_hover_sc(n) for n in nodes_sc]
 
-    # ── Build figure ───────────────────────────────────────────────────────
-    BG = "#07071a"
+    # ── White-background colour overrides ────────────────────────────────
+    # The CSV stores colours tuned for the dark theme. Remap to darker
+    # equivalents that have sufficient contrast on white (#WCAG AA target).
+    WHITE_NODE_MAP = {
+        "#84CC16": "#3B6E0E",   # lime-500  → dark lime       (chip designers)
+        "#06B6D4": "#0E7490",   # cyan-400  → cyan-700        (equipment)
+        "#14B8A6": "#0F766E",   # teal-400  → teal-700        (memory fabs)
+        "#64748B": "#334155",   # slate-500 → slate-700       (aggregates)
+        "#0EA5E9": "#0369A1",   # sky-400   → sky-700         (memory end-markets)
+        "#8B5CF6": "#6D28D9",   # violet-500→ violet-700      (sub-components)
+        "#F59E0B": "#B45309",   # amber-400 → amber-700       (process ctrl)
+        "#D97706": "#92400E",   # amber-500 → amber-800       (raw materials)
+        "#6366F1": "#4338CA",   # indigo-500→ indigo-700      (EDA)
+        "#EC4899": "#BE185D",   # pink-400  → pink-700        (logic fabs)
+    }
 
+    node_colors_white = [WHITE_NODE_MAP.get(c, c) for c in node_colors_sc]
+
+    # Recompute link colours at lower opacity so ribbons don't overpower
+    # the white background (0.22 opacity vs 0.42 on dark)
+    def _link_rgba(hex_src, alpha=0.22):
+        h = WHITE_NODE_MAP.get(hex_src, hex_src).lstrip("#")
+        r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+        return f"rgba({r},{g},{b},{alpha})"
+
+    link_colors_white = [
+        _link_rgba(c) for c in df_sc["node_color_hex"].tolist()
+    ]
+
+    # ── Build figure ───────────────────────────────────────────────────────
     fig_atlas = go.Figure(go.Sankey(
         arrangement="snap",
         node=dict(
             label         = node_labels_sc,
-            color         = node_colors_sc,
+            color         = node_colors_white,
             x             = node_x_sc,
             pad           = 20,
             thickness     = 22,
-            line          = dict(color="rgba(0,0,0,0)", width=0),
+            line          = dict(color="rgba(255,255,255,0.6)", width=0.5),
             hovertemplate = "%{customdata}<extra></extra>",
             customdata    = node_hover_text_sc,
         ),
@@ -833,7 +860,7 @@ with tab3:
             source        = df_sc["source"].map(n_idx_sc).tolist(),
             target        = df_sc["target"].map(n_idx_sc).tolist(),
             value         = df_sc["value_usd_bn"].tolist(),
-            color         = df_sc["link_color_rgba"].tolist(),
+            color         = link_colors_white,
             hovertemplate = (
                 "<b>%{source.label}  →  %{target.label}</b><br>"
                 "$%{value:.1f}B<br>"
@@ -842,23 +869,24 @@ with tab3:
             ),
             customdata = df_sc[["confidence_level", "source_document"]].values.tolist(),
         ),
+        textfont=dict(color="#1e293b", size=10, family="Arial"),
     ))
 
     fig_atlas.update_layout(
         title=dict(
             text=(
                 "Semiconductor Supply Chain — FY2024/25"
-                "<br><span style='font-size:13px;color:#94a3b8'>"
+                "<br><span style='font-size:13px;color:#64748b'>"
                 "Link colour = source node category  ·  "
                 "Hover nodes/links for citations and segment data"
                 "</span>"
             ),
-            font=dict(color="white", size=18, family="Arial Black, Arial"),
+            font=dict(color="#0f172a", size=18, family="Arial Black, Arial"),
             x=0.5, xanchor="center",
         ),
-        paper_bgcolor = BG,
-        plot_bgcolor  = BG,
-        font          = dict(color="#cbd5e1", size=10, family="Arial"),
+        paper_bgcolor = "white",
+        plot_bgcolor  = "white",
+        font          = dict(color="#1e293b", size=10, family="Arial"),
         height        = 980,
         margin        = dict(l=10, r=10, t=100, b=60),
     )
@@ -873,27 +901,28 @@ with tab3:
         fig_atlas.add_annotation(
             x=x_pos, y=1.055, xref="paper", yref="paper",
             text=f"<b>{label}</b>", showarrow=False,
-            font=dict(color="#94a3b8", size=13, family="Arial"),
+            font=dict(color="#374151", size=13, family="Arial"),
         )
 
-    # Colour legend
+    # Colour legend — use white-bg mapped colours
     legend_items = [
-        ("#8B5CF6", "Precision Sub-Components"),
-        ("#F59E0B", "Process Control"),
-        ("#D97706", "Raw Materials & Wafers"),
-        ("#06B6D4", "Semiconductor Equipment"),
-        ("#6366F1", "EDA & IP"),
-        ("#EC4899", "Logic Fabs"),
-        ("#14B8A6", "Memory Fabs"),
-        ("#84CC16", "Chip Designers"),
-        ("#64748B", "Aggregates"),
+        ("#6D28D9", "Precision Sub-Components"),
+        ("#B45309", "Process Control"),
+        ("#92400E", "Raw Materials & Wafers"),
+        ("#0E7490", "Semiconductor Equipment"),
+        ("#4338CA", "EDA & IP"),
+        ("#BE185D", "Logic Fabs"),
+        ("#0F766E", "Memory Fabs"),
+        ("#3B6E0E", "Chip Designers"),
+        ("#0369A1", "Memory End-Markets"),
+        ("#334155", "Aggregates"),
     ]
     for i, (col, lbl) in enumerate(legend_items):
         fig_atlas.add_annotation(
-            x=i * 0.115, y=-0.05, xref="paper", yref="paper",
+            x=i * 0.105, y=-0.05, xref="paper", yref="paper",
             text=f"<span style='color:{col}'>■</span> {lbl}",
             showarrow=False, xanchor="left",
-            font=dict(color="#94a3b8", size=9, family="Arial"),
+            font=dict(color="#374151", size=9, family="Arial"),
         )
 
     st.plotly_chart(fig_atlas, width='stretch')
