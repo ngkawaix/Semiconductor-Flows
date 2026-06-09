@@ -101,8 +101,8 @@ def load_asean_chips():
 @st.cache_data
 def load_sankey_data():
     """Load company-level supply chain atlas data from CSV files."""
-    df   = pd.read_csv("semi_supply_chain_sankey_v2.csv")
-    meta = pd.read_csv("node_metadata_v2.csv").set_index("node_name")
+    df   = pd.read_csv("semi_supply_chain_sankey_v3.csv")
+    meta = pd.read_csv("node_metadata_v3.csv").set_index("node_name")
     return df, meta
 
 # ── Canonical colour palette ───────────────────────────────────────────────
@@ -166,11 +166,17 @@ DISCLOSED_REVENUE = {
     "Arm Holdings":       4.0,   # FY2025
     "Synopsys":           7.1,   # FY2025
     "Cadence":            5.3,   # FY2025
+    # Batch 1 additions — Chip Designers
+    "NXP Semiconductors": 12.9,  # FY2024
+    "Marvell":             7.6,  # FY2026 (Feb 2026 YE); AI-driven growth
+    "Texas Instruments":  15.6,  # FY2024; ~90% IDM (own fabs)
+    # TI Fabs — internal manufacturing arm
+    "TI Fabs":            15.6,  # same as TI (represents TI's own manufacturing base)
     # Sub-components
-    "Zeiss SMT":          5.5,   # floor estimate
-    "Entegris":           3.2,   # FY2024
-    "SUMCO":              2.6,   # FY2024
-    "MKS Instruments":    3.6,   # FY2024
+    "Zeiss SMT":           5.5,  # floor estimate
+    "Entegris":            3.2,  # FY2024
+    "SUMCO":               2.6,  # FY2024
+    "MKS Instruments":     3.6,  # FY2024
 }
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -749,7 +755,7 @@ with tab3:
     except FileNotFoundError:
         st.error(
             "Atlas data files not found. "
-            "Place **semi_supply_chain_sankey_v2.csv** and **node_metadata_v2.csv** "
+            "Place **semi_supply_chain_sankey_v3.csv** and **node_metadata_v3.csv** "
             "in the same folder as app.py, then restart."
         )
         st.stop()
@@ -847,10 +853,12 @@ with tab3:
                 "Hover nodes/links for citations and segment data"
                 "</span>"
             ),
-            font=dict(color="black", size=18, family="Arial Black, Arial"),
+            font=dict(color="white", size=18, family="Arial Black, Arial"),
             x=0.5, xanchor="center",
         ),
-        font          = dict(color="black", size=10, family="Arial"),
+        paper_bgcolor = BG,
+        plot_bgcolor  = BG,
+        font          = dict(color="#cbd5e1", size=10, family="Arial"),
         height        = 980,
         margin        = dict(l=10, r=10, t=100, b=60),
     )
