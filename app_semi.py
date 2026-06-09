@@ -4,6 +4,7 @@ import pandas as pd
 import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
+import os
 
 st.set_page_config(
     page_title="Semiconductor Supply Chain Intelligence",
@@ -39,7 +40,7 @@ def load_global_equip_data():
     years = ','.join(str(y) for y in range(2018, 2026))
     df    = comtrade.getFinalData(
         key, typeCode='C', freqCode='A', clCode='HS', period=years,
-        reporterCode='528,842,392,276,410',   # Netherlands, USA, Japan, Germany, S. Korea
+        reporterCode='528,842,392,276,410',
         cmdCode='8486', flowCode='X',
         partnerCode=None, partner2Code=None, customsCode=None, motCode=None,
         maxRecords=250000, format_output='JSON', aggregateBy=None,
@@ -97,9 +98,14 @@ def load_asean_chips():
     df['year'] = df['year'].astype(int)
     return df
 
-# ── Canonical colour palette (YlGnBu-inspired, muted and professional) ──────
-# Single source of truth for every country that appears in either arc map,
-# Sankey, or time series. Add new countries here only.
+@st.cache_data
+def load_sankey_data():
+    """Load company-level supply chain atlas data from CSV files."""
+    df   = pd.read_csv("semi_supply_chain_sankey_v2.csv")
+    meta = pd.read_csv("node_metadata_v2.csv").set_index("node_name")
+    return df, meta
+
+# ── Canonical colour palette ───────────────────────────────────────────────
 country_hex = {
     'Taiwan':        '#1d91c0',
     'Rep. of Korea': '#41b6c4',
@@ -109,8 +115,6 @@ country_hex = {
     'Japan':         '#c7e9b4',
     'Germany':       '#9e9ac8',
 }
-
-# RGBA equivalent for pydeck ArcLayer
 country_rgba = {
     'Taiwan':        [29,  145, 192, 210],
     'Rep. of Korea': [65,  182, 196, 210],
@@ -120,21 +124,53 @@ country_rgba = {
     'Japan':         [199, 233, 180, 210],
     'Germany':       [158, 154, 200, 210],
 }
-
-# Ordered lists that define each section's exporter set (order = Sankey row order)
 IC_EXPORTERS    = ['Taiwan', 'Rep. of Korea', 'China', 'Netherlands', 'USA', 'Japan']
 EQUIP_EXPORTERS = ['Netherlands', 'USA', 'Japan', 'Germany', 'Rep. of Korea']
-
-# Hex subsets for Plotly color_discrete_map and Sankey node colours
 src_hex       = {k: country_hex[k] for k in IC_EXPORTERS}
 equip_src_hex = {k: country_hex[k] for k in EQUIP_EXPORTERS}
-
-# YlGnBu status colours for ASEAN table
 status_colours = {
     'Rising Hub':         '#1d91c0',
     'Assembly Dependent': '#41b6c4',
     'Emerging':           '#7fcdbb',
     'Lagging':            '#c7e9b4',
+}
+
+# ── Actual disclosed revenues for named companies (USD billions) ────────────
+# Used to label terminal nodes in the supply chain atlas with real revenue
+# rather than supply chain inflow cost (which understates chip designer value)
+DISCLOSED_REVENUE = {
+    # Chip Designers — FY2025/26 (terminal nodes; label = actual company revenue)
+    "Nvidia":           215.9,   # FY2026 (Jan 2026 YE)
+    "AMD":               34.6,   # FY2025 (Dec 2025 YE)
+    "Broadcom":          63.9,   # FY2025 (Nov 2025 YE)
+    "Qualcomm":          44.3,   # FY2025 (Sep 2025 YE)
+    "MediaTek":          18.6,   # FY2025 (Dec 2025 YE)
+    "Intel Chips":       43.1,   # FY2025 CCG $30.3B + DCAI $12.8B
+    "Apple Silicon":     19.9,   # TSMC fab cost only (Apple doesn't sell chips)
+    # Foundry & Memory
+    "TSMC":             118.0,   # FY2025
+    "Samsung Memory":    74.4,   # FY2025
+    "Samsung Foundry":   17.0,   # FY2025 analyst estimate
+    "SK Hynix":          67.9,   # FY2025
+    "Micron":            37.4,   # FY2025
+    "GlobalFoundries":    6.75,  # FY2024
+    "Intel Fabs":        17.5,   # FY2025 intersegment
+    # Equipment
+    "ASML":              36.0,   # FY2025
+    "Applied Materials": 28.4,   # FY2025
+    "Lam Research":      18.4,   # FY2025
+    "Tokyo Electron":    16.2,   # FY2025
+    "KLA":               12.2,   # FY2025
+    "Screen Holdings":    4.2,   # FY2025
+    # EDA & IP
+    "Arm Holdings":       4.0,   # FY2025
+    "Synopsys":           7.1,   # FY2025
+    "Cadence":            5.3,   # FY2025
+    # Sub-components
+    "Zeiss SMT":          5.5,   # floor estimate
+    "Entegris":           3.2,   # FY2024
+    "SUMCO":              2.6,   # FY2024
+    "MKS Instruments":    3.6,   # FY2024
 }
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -165,42 +201,23 @@ def hex_to_rgba(hex_color, alpha=0.45):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
-# Destination node colour ramp (YlGnBu, light → dark, for right-side Sankey nodes)
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
 
 def build_sankey_fig(df_flow, hex_palette):
-    """Build a Plotly Sankey figure from a reporter→partner flow DataFrame.
-
-    Uses Plotly's default 'perpendicular' layout (no fixed x/y positions).
-    Because the data is strictly one-directional after exporter filtering,
-    Plotly naturally places source nodes on the left and destination nodes on
-    the right — without any manual positioning. This avoids the clipping that
-    occurs when large-value node bars overflow manually-set y boundaries.
-
-    Args:
-        df_flow: DataFrame with columns reporterDesc, partnerDesc, primaryValue
-        hex_palette: dict mapping reporter names to hex colour strings
-    """
     src_nodes = list(df_flow['reporterDesc'].unique())
     tgt_nodes = list(df_flow['partnerDesc'].unique())
     all_nodes = src_nodes + tgt_nodes
     node_idx  = {n: i for i, n in enumerate(all_nodes)}
-    n_src = len(src_nodes)
     n_tgt = len(tgt_nodes)
-
     node_colors = (
         [hex_palette.get(n, '#888888') for n in src_nodes] +
         [_YLGNBU_DEST[i % len(_YLGNBU_DEST)] for i in range(n_tgt)]
     )
-
     link_sources = [node_idx[r] for r in df_flow['reporterDesc']]
     link_targets  = [node_idx[t] for t in df_flow['partnerDesc']]
     link_values   = (df_flow['primaryValue'] / 1e9).round(1).tolist()
     link_colors   = [hex_to_rgba(hex_palette.get(r, '#888888')) for r in df_flow['reporterDesc']]
-
-    # Height scales with node count; Plotly manages the vertical layout
-    height = max(480, max(n_src, n_tgt) * 60 + 100)
-
+    height = max(480, max(len(src_nodes), len(tgt_nodes)) * 60 + 100)
     fig = go.Figure(go.Sankey(
         node=dict(
             pad=20, thickness=20,
@@ -224,7 +241,6 @@ def build_sankey_fig(df_flow, hex_palette):
 @st.cache_data
 def build_asean_summary(df_equip, df_chips):
     df_asean = df_equip.merge(df_chips, on=['country','year'], how='outer')
-
     start_yr = 2018
 
     def get_val(df, country, yr, col):
@@ -232,16 +248,11 @@ def build_asean_summary(df_equip, df_chips):
         return row[col].values[0] if not row.empty else None
 
     countries_asean = sorted(df_asean['country'].unique())
-
-    # Use each country's own latest reported year — avoids None values when
-    # some countries have filed 2025 data and others haven't yet
     latest_yr = {
         c: int(df_asean[df_asean['country'] == c]['year'].max())
         for c in countries_asean
     }
-
     summary = pd.DataFrame(index=countries_asean)
-
     for col, label_s, label_e, metric in [
         ('equip_imports', 'Equip Imports 2018 ($B)', 'Equip Imports Latest ($B)', 'Equip CAGR (%)'),
         ('chip_exports',  'Chip Exports 2018 ($B)',  'Chip Exports Latest ($B)',  'Chip Export CAGR (%)'),
@@ -254,11 +265,9 @@ def build_asean_summary(df_equip, df_chips):
             c: cagr(vals_s[c], vals_e[c], latest_yr[c] - start_yr)
             for c in countries_asean
         })
-
     summary['Value Chain Ratio'] = (
         summary['Chip Exports Latest ($B)'] / summary['Equip Imports Latest ($B)']
     ).round(2)
-
     med_equip = summary['Equip CAGR (%)'].median()
     med_chips = summary['Chip Export CAGR (%)'].median()
 
@@ -272,7 +281,6 @@ def build_asean_summary(df_equip, df_chips):
 
     summary['Status'] = summary.apply(classify, axis=1)
     summary = summary.round(2).sort_values('Chip Export CAGR (%)', ascending=False)
-
     return summary, med_equip, med_chips
 
 # ── Load all data ──────────────────────────────────────────────────────────
@@ -286,17 +294,14 @@ with st.spinner("Loading UN Comtrade data. This may take a moment on first load.
 st.sidebar.title("Controls")
 st.sidebar.markdown("### IC Exporters")
 st.sidebar.caption("Applies to the IC section of Tab 1.")
-
 selected_countries = []
 for country, hex_c in src_hex.items():
-    label = f'<span style="color:{hex_c}; font-size:16px">■</span> {country}'
     if st.sidebar.checkbox(country, value=True, key=f"toggle_{country}"):
         selected_countries.append(country)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Equipment Exporters")
 st.sidebar.caption("Applies to the Equipment section of Tab 1.")
-
 selected_equip_countries = []
 for country, hex_c in equip_src_hex.items():
     if st.sidebar.checkbox(country, value=True, key=f"eq_toggle_{country}"):
@@ -316,7 +321,11 @@ st.sidebar.markdown(
 )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["🌍  Global Supply Chain", "🏭  ASEAN Value Chain"])
+tab1, tab2, tab3 = st.tabs([
+    "🌍  Global Supply Chain",
+    "🏭  ASEAN Value Chain",
+    "🏢  Company Supply Chain Atlas",
+])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — GLOBAL SUPPLY CHAIN
@@ -324,7 +333,6 @@ tab1, tab2 = st.tabs(["🌍  Global Supply Chain", "🏭  ASEAN Value Chain"])
 with tab1:
     st.title("Global Semiconductor Trade Flows")
 
-    # Shared coordinate lookup used by both arc maps
     coords_df = (
         pd.DataFrame.from_dict(country_coords, orient='index', columns=['lat','lon'])
         .reset_index().rename(columns={'index':'ISO'})
@@ -400,8 +408,6 @@ with tab1:
         st.info("Select at least one IC exporter in the sidebar to display the map.")
 
     st.markdown("---")
-
-    # ── IC Sankey ──────────────────────────────────────────────────────────
     st.subheader("IC exporters to importers")
     st.caption(
         "Left: 6 major IC-exporting nations. "
@@ -427,8 +433,6 @@ with tab1:
         st.info("Select at least one IC exporter in the sidebar to display the Sankey.")
 
     st.markdown("---")
-
-    # ── IC Time series ─────────────────────────────────────────────────────
     st.subheader("IC Export Trends by Country (2018–2025)")
     df_trend = (
         df_global[df_global['reporterDesc'].isin(selected_countries)]
@@ -462,8 +466,7 @@ with tab1:
     st.header("⚙️ Semiconductor Equipment (HS 8486)")
     st.caption(
         "Exports of lithography machines (EUV/DUV), etch tools, deposition systems, and metrology. "
-        "Left = exporters, right = importers. "
-        "Data: UN Comtrade."
+        "Left = exporters, right = importers. Data: UN Comtrade."
     )
     st.markdown(
         "> **Why these countries?** These five nations control the critical tooling that every chip fab depends on. "
@@ -501,7 +504,6 @@ with tab1:
         df_eq_year_all[df_eq_year_all['reporterDesc']=='Netherlands']['primaryValue'].sum()
         / total_eq_cur * 100
     ) if total_eq_cur > 0 else 0
-
     producer_set_eq = set(EQUIP_EXPORTERS)
     top_eq_dest_ser = (
         df_eq_year_all[~df_eq_year_all['partnerDesc'].isin(producer_set_eq)]
@@ -538,8 +540,6 @@ with tab1:
         st.info("Select at least one equipment exporter in the sidebar to display the map.")
 
     st.markdown("---")
-
-    # ── Equipment Sankey ───────────────────────────────────────────────────
     st.subheader("Equipment exporters to importers")
     st.caption(
         "Left: 5 major equipment-exporting nations. "
@@ -564,8 +564,6 @@ with tab1:
         st.info("Select at least one equipment exporter in the sidebar to display the Sankey.")
 
     st.markdown("---")
-
-    # ── Equipment Time series ──────────────────────────────────────────────
     st.subheader("Equipment Export Trends by Country (2018–2025)")
     df_eq_trend_global = (
         df_global_equip[df_global_equip['reporterDesc'].isin(selected_equip_countries)]
@@ -593,7 +591,6 @@ with tab1:
         yaxis=dict(gridcolor='rgba(0,0,0,0.08)'), margin=dict(t=20),
     )
     st.plotly_chart(fig_eq_ts, width='stretch')
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -633,7 +630,6 @@ with tab2:
         }, na_rep='N/A')
     )
     st.dataframe(styled, width='stretch')
-
     st.markdown("---")
 
     st.subheader("Value Chain Quadrant Analysis")
@@ -685,11 +681,9 @@ with tab2:
     st.plotly_chart(fig_scatter, width='stretch')
 
     st.markdown("---")
-
     st.subheader("Equipment Imports vs IC Exports Over Time")
     col_a, col_b = st.columns(2)
 
-    # Shared YlGnBu colour sequence for ASEAN countries
     ylgnbu_seq = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1']
     asean_countries = sorted(df_equip['country'].unique())
     asean_colours   = {c: ylgnbu_seq[i % len(ylgnbu_seq)] for i, c in enumerate(asean_countries)}
@@ -727,3 +721,202 @@ with tab2:
             yaxis=dict(gridcolor='rgba(0,0,0,0.08)'),
         )
         st.plotly_chart(fig_ch, width='stretch')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — COMPANY SUPPLY CHAIN ATLAS
+# ══════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.title("Company-Level Supply Chain Atlas")
+    st.caption(
+        "Revenue flows between named companies across five layers of the semiconductor supply chain. "
+        "FY2024/25 annual report data, 105 flows, 46 nodes."
+    )
+
+    st.info(
+        "**Reading the chart** — Node width = revenue flowing through that company. "
+        "Named chip designers (Nvidia, AMD, etc.) show their **total disclosed revenue**, "
+        "not just the portion modelled here. "
+        "The gap between a node's inflow (what it pays suppliers) and its outflow "
+        "(what customers pay it) is the company's **value-add**: design IP, process R&D, "
+        "software stack, and margin. Hover any node or link for source citations.",
+        icon="ℹ️"
+    )
+
+    # ── Load atlas data ────────────────────────────────────────────────────
+    try:
+        df_sc, meta_sc = load_sankey_data()
+    except FileNotFoundError:
+        st.error(
+            "Atlas data files not found. "
+            "Place **semi_supply_chain_sankey_v2.csv** and **node_metadata_v2.csv** "
+            "in the same folder as app.py, then restart."
+        )
+        st.stop()
+
+    # ── Build node arrays ──────────────────────────────────────────────────
+    nodes_sc = sorted(set(df_sc["source"]) | set(df_sc["target"]))
+    n_idx_sc = {n: i for i, n in enumerate(nodes_sc)}
+
+    def get_meta_sc(col, default):
+        return [
+            meta_sc.loc[n, col] if n in meta_sc.index else default
+            for n in nodes_sc
+        ]
+
+    node_colors_sc = get_meta_sc("color_hex", "#64748B")
+    node_x_sc = [
+        max(0.001, min(0.999, float(v)))
+        for v in get_meta_sc("x_position_hint", 0.5)
+    ]
+    # EDA/IP to leftmost column — long ribbons to chip designers (YouTube style)
+    for i, n in enumerate(nodes_sc):
+        if n in {"Arm Holdings", "Synopsys", "Cadence"}:
+            node_x_sc[i] = 0.01
+
+    # ── Labels: use actual disclosed revenues for named companies ──────────
+    outflow_sc = df_sc.groupby("source")["value_usd_bn"].sum().to_dict()
+    inflow_sc  = df_sc.groupby("target")["value_usd_bn"].sum().to_dict()
+
+    def node_label_sc(n):
+        # Named companies: show actual disclosed revenue
+        if n in DISCLOSED_REVENUE:
+            return f"{n}\n${DISCLOSED_REVENUE[n]:.0f}B"
+        # Aggregate/residual nodes: show flow value
+        val = outflow_sc.get(n) or inflow_sc.get(n) or 0
+        return f"{n}\n${val:.0f}B"
+
+    def node_hover_sc(n):
+        if n not in meta_sc.index:
+            return f"<b>{n}</b>"
+        cat   = meta_sc.loc[n, "node_category"]
+        ann   = str(meta_sc.loc[n, "annotation"]).strip()
+        title = str(meta_sc.loc[n, "annotation_title"]).strip()
+        src   = str(meta_sc.loc[n, "annotation_source"]).strip()
+        rev   = DISCLOSED_REVENUE.get(n)
+        base  = f"<b>{n}</b><br><span style='color:#94a3b8'>{cat}</span>"
+        if rev:
+            base += f"<br>Disclosed revenue: <b>${rev:.1f}B</b>"
+        if ann and ann != "nan":
+            return (
+                f"{base}<br><br><i>{title}</i><br>"
+                f"{ann.replace(chr(10), '<br>')}<br><br>"
+                f"<span style='color:#64748b;font-size:10px'>{src}</span>"
+            )
+        return base
+
+    node_labels_sc     = [node_label_sc(n) for n in nodes_sc]
+    node_hover_text_sc = [node_hover_sc(n) for n in nodes_sc]
+
+    # ── Build figure ───────────────────────────────────────────────────────
+    BG = "#07071a"
+
+    fig_atlas = go.Figure(go.Sankey(
+        arrangement="snap",
+        node=dict(
+            label         = node_labels_sc,
+            color         = node_colors_sc,
+            x             = node_x_sc,
+            pad           = 20,
+            thickness     = 22,
+            line          = dict(color="rgba(0,0,0,0)", width=0),
+            hovertemplate = "%{customdata}<extra></extra>",
+            customdata    = node_hover_text_sc,
+        ),
+        link=dict(
+            source        = df_sc["source"].map(n_idx_sc).tolist(),
+            target        = df_sc["target"].map(n_idx_sc).tolist(),
+            value         = df_sc["value_usd_bn"].tolist(),
+            color         = df_sc["link_color_rgba"].tolist(),
+            hovertemplate = (
+                "<b>%{source.label}  →  %{target.label}</b><br>"
+                "$%{value:.1f}B<br>"
+                "Confidence: %{customdata[0]}<br>"
+                "Source: %{customdata[1]}<extra></extra>"
+            ),
+            customdata = df_sc[["confidence_level", "source_document"]].values.tolist(),
+        ),
+    ))
+
+    fig_atlas.update_layout(
+        title=dict(
+            text=(
+                "Semiconductor Supply Chain — FY2024/25"
+                "<br><span style='font-size:13px;color:#94a3b8'>"
+                "Link colour = source node category  ·  "
+                "Hover nodes/links for citations and segment data"
+                "</span>"
+            ),
+            font=dict(color="white", size=18, family="Arial Black, Arial"),
+            x=0.5, xanchor="center",
+        ),
+        paper_bgcolor = BG,
+        plot_bgcolor  = BG,
+        font          = dict(color="#cbd5e1", size=10, family="Arial"),
+        height        = 980,
+        margin        = dict(l=10, r=10, t=100, b=60),
+    )
+
+    # Column headers
+    for x_pos, label in [
+        (0.01, "Component Tools"),
+        (0.23, "Advanced Tools"),
+        (0.56, "Fabricators"),
+        (0.88, "Chip Designers"),
+    ]:
+        fig_atlas.add_annotation(
+            x=x_pos, y=1.055, xref="paper", yref="paper",
+            text=f"<b>{label}</b>", showarrow=False,
+            font=dict(color="#94a3b8", size=13, family="Arial"),
+        )
+
+    # Colour legend
+    legend_items = [
+        ("#8B5CF6", "Precision Sub-Components"),
+        ("#F59E0B", "Process Control"),
+        ("#D97706", "Raw Materials & Wafers"),
+        ("#06B6D4", "Semiconductor Equipment"),
+        ("#6366F1", "EDA & IP"),
+        ("#EC4899", "Logic Fabs"),
+        ("#14B8A6", "Memory Fabs"),
+        ("#84CC16", "Chip Designers"),
+        ("#64748B", "Aggregates"),
+    ]
+    for i, (col, lbl) in enumerate(legend_items):
+        fig_atlas.add_annotation(
+            x=i * 0.115, y=-0.05, xref="paper", yref="paper",
+            text=f"<span style='color:{col}'>■</span> {lbl}",
+            showarrow=False, xanchor="left",
+            font=dict(color="#94a3b8", size=9, family="Arial"),
+        )
+
+    st.plotly_chart(fig_atlas, width='stretch')
+
+    # ── Data quality note ──────────────────────────────────────────────────
+    with st.expander("📊 Data quality breakdown"):
+        conf_counts = df_sc["confidence_level"].value_counts().reset_index()
+        conf_counts.columns = ["Confidence Level", "Flow Count"]
+        conf_counts["% of flows"] = (conf_counts["Flow Count"] / len(df_sc) * 100).round(1)
+
+        CONF_COLORS = {
+            "DIRECTLY_DISCLOSED":          "#14B8A6",
+            "DIRECTLY_DISCLOSED_FLOOR":    "#06B6D4",
+            "DIRECTLY_DISCLOSED_RESIDUAL": "#6366F1",
+            "INFERRED":                    "#F59E0B",
+            "ANALYST_ESTIMATE":            "#EC4899",
+            "ANALYST_ESTIMATE_RESIDUAL":   "#EF4444",
+        }
+
+        def style_conf(val):
+            c = CONF_COLORS.get(val, "#94a3b8")
+            return f"background-color:{c}20; color:{c}; font-weight:bold"
+
+        st.dataframe(
+            conf_counts.style.map(style_conf, subset=["Confidence Level"]),
+            width="stretch",
+        )
+        st.caption(
+            "**Teal/cyan/indigo** = hard data from public filings.  "
+            "**Amber** = percentage disclosed, company identity inferred from consensus.  "
+            "**Pink/red** = analyst estimates from geographic/application proxies."
+        )
