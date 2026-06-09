@@ -847,12 +847,10 @@ with tab3:
                 "Hover nodes/links for citations and segment data"
                 "</span>"
             ),
-            font=dict(color="white", size=18, family="Arial Black, Arial"),
+            font=dict(color="black", size=18, family="Arial Black, Arial"),
             x=0.5, xanchor="center",
         ),
-        paper_bgcolor = BG,
-        plot_bgcolor  = BG,
-        font          = dict(color="#cbd5e1", size=10, family="Arial"),
+        font          = dict(color="black", size=10, family="Arial"),
         height        = 980,
         margin        = dict(l=10, r=10, t=100, b=60),
     )
