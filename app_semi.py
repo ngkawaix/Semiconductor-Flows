@@ -222,7 +222,7 @@ def build_arc_layers(df, color_col='color', width_col='width'):
         get_source_color='_glow_color',
         get_target_color='_glow_color',
         get_width='_glow_width',
-        get_height=1.3,
+        get_height=0.2,
         great_circle=True,
         pickable=False,
     )
@@ -233,7 +233,7 @@ def build_arc_layers(df, color_col='color', width_col='width'):
         get_source_color=color_col,
         get_target_color=color_col,
         get_width=width_col,
-        get_height=1.3,
+        get_height=0.2,
         great_circle=True,
         pickable=True,
         auto_highlight=True,
