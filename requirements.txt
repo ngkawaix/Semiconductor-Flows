@@ -1,6 +1,7 @@
-streamlit
-pydeck
+streamlit>=1.39
+pydeck>=0.9.1
 pandas
+numpy
 comtradeapicall
 requests
-plotly
+plotly>=5.20
