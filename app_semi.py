@@ -575,15 +575,16 @@ projection = st.sidebar.radio(
 )
 use_globe = projection.endswith("Globe")
 
+st.sidebar.markdown("---")
 st.sidebar.markdown("### IC Exporters")
-st.sidebar.caption("Applies to the IC section of Tab 1.")
+st.sidebar.caption(
+    "Toggles IC export flows (HS 8542) from top IC exporters to importers. "
 selected_countries = []
 for country in IC_EXPORTERS:          # alphabetical: China, Japan, Korea, Taiwan, USA
     hex_c = src_hex[country]
     if st.sidebar.checkbox(country, value=True, key=f"toggle_{country}"):
         selected_countries.append(country)
 
-st.sidebar.markdown("---")
 st.sidebar.markdown("### IC Re-exports Hubs")
 st.sidebar.caption(
     "Overlay IC re-export flows (HS 8542) from key intermediate hubs onto the IC map. "
