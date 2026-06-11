@@ -579,6 +579,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### IC Exporters")
 st.sidebar.caption(
     "Toggles IC export flows (HS 8542) from top IC exporters to importers. "
+)
 selected_countries = []
 for country in IC_EXPORTERS:          # alphabetical: China, Japan, Korea, Taiwan, USA
     hex_c = src_hex[country]
