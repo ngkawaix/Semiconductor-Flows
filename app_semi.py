@@ -291,6 +291,45 @@ def build_arc_layers(df, color_col='color', width_col='width'):
     )
     return [glow_layer, core_layer]
 
+def build_globe_deck(layers, key, tooltip_text):
+    """
+    Render arc layers on a true 3-D globe using pydeck's MapView with
+    globe=True projection.
+
+    Why this matters
+    ----------------
+    A flat Mercator map has a hard limit called the antimeridian (180° lon).
+    Any arc that crosses it gets clipped and redrawn from the opposite edge,
+    creating the broken "stops mid-ocean and restarts" artefact you see for
+    Taiwan → USA routes.  On a globe there is no antimeridian — every arc is
+    a continuous great-circle curve, exactly as it would look from space.
+
+    The MapView parameters:
+      globe=True          — switches the projection engine from Mercator to
+                            a WebGL sphere
+      controller=True     — keeps mouse pan / zoom / rotate working
+      repeat=False        — stops the world from tiling side-by-side
+
+    ViewState for a globe is still lat/lon/zoom but the semantics change
+    slightly: zoom=1.1 puts the whole Earth in frame, centred on the
+    semiconductor heartland (East Asia / Indian Ocean).
+    """
+    view = pdk.View(type='MapView', controller=True, repeat=False)
+    return pdk.Deck(
+        views=[view],
+        layers=layers,
+        initial_view_state=pdk.ViewState(
+            latitude=20,
+            longitude=105,   # centred on East Asia — the supply chain origin
+            zoom=1.1,
+            pitch=0,
+        ),
+        map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+        tooltip={'text': tooltip_text},
+        parameters={'globe': True},   # deck.gl globe flag passed via parameters
+    )
+
+
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
 
 def build_sankey_fig(df_flow, hex_palette):
@@ -453,7 +492,7 @@ with tab1:
         .sum().sort_values(ascending=False).head(15).index.tolist()
     )
     df_arcs = (
-        df_arcs[df_arcs['partnerISO'].isin(top_partners) & (df_arcs['target_lat'] < 60)]
+        df_arcs[df_arcs['partnerISO'].isin(top_partners)]
         .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
                   'period','source_lat','source_lon','target_lat','target_lon'])
         ['primaryValue'].sum().reset_index()
@@ -480,11 +519,10 @@ with tab1:
         df_year['width']     = (df_year['primaryValue'] / df_year['primaryValue'].max() * 25).clip(lower=2)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
-            pdk.Deck(
+            build_globe_deck(
                 layers=build_arc_layers(df_year),
-                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=35),
-                map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-                tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
+                key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}",
+                tooltip_text='{reporterDesc} → {partnerDesc}\n{value_fmt}',
             ),
             key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}"
         )
@@ -571,7 +609,7 @@ with tab1:
         .sum().sort_values(ascending=False).head(15).index.tolist()
     )
     df_arcs_eq = (
-        df_arcs_eq[df_arcs_eq['partnerISO'].isin(top_partners_eq) & (df_arcs_eq['target_lat'] < 60)]
+        df_arcs_eq[df_arcs_eq['partnerISO'].isin(top_partners_eq)]
         .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
                   'period','source_lat','source_lon','target_lat','target_lon'])
         ['primaryValue'].sum().reset_index()
@@ -606,11 +644,10 @@ with tab1:
         df_eq_year['width']     = (df_eq_year['primaryValue'] / df_eq_year['primaryValue'].max() * 25).clip(lower=2)
         df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
-            pdk.Deck(
+            build_globe_deck(
                 layers=build_arc_layers(df_eq_year),
-                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=35),
-                map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-                tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
+                key=f"arc_eq_{year}_{'_'.join(sorted(selected_equip_countries))}",
+                tooltip_text='{reporterDesc} → {partnerDesc}\n{value_fmt}',
             ),
             key=f"arc_eq_{year}_{'_'.join(sorted(selected_equip_countries))}"
         )
