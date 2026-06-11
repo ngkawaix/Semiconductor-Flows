@@ -112,7 +112,7 @@ def load_sankey_data():
 country_hex = {
     'Taiwan':        '#1d91c0',
     'Rep. of Korea': '#41b6c4',
-    'China':         '#D85A30',
+    'China':         '#DC2626',
     'Netherlands':   '#7fcdbb',
     'USA':           '#225ea8',
     'Japan':         '#c7e9b4',
@@ -121,7 +121,7 @@ country_hex = {
 country_rgba = {
     'Taiwan':        [29,  145, 192, 210],
     'Rep. of Korea': [65,  182, 196, 210],
-    'China':         [216,  90,  48, 210],
+    'China':         [220,  38,  38, 210],
     'Netherlands':   [127, 205, 187, 210],
     'USA':           [34,   94, 168, 210],
     'Japan':         [199, 233, 180, 210],
@@ -350,7 +350,7 @@ def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
             if len(p) > 1:
                 halo_paths.append({
                     'path':    p,
-                    'color':   src_rgb + [38],
+                    'color':   src_rgb + [50],
                     'width':   width * 2.1,
                     'tooltip': tooltip,
                 })
@@ -405,6 +405,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
             get_path='path', get_color='color', get_width='width',
             width_units='pixels', cap_rounded=True, joint_rounded=True,
             pickable=False,
+            parameters={'depthTest': False},   # don't z-fight the globe surface
         ))
     layers.append(pdk.Layer(
         'LineLayer', data=seg_df,
@@ -414,12 +415,14 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
         width_units='pixels',
         pickable=True, auto_highlight=True,
         highlight_color=[255, 255, 255, 140],
+        parameters={'depthTest': False},
     ))
     if not arrow_df.empty:
         layers.append(pdk.Layer(
             'PolygonLayer', data=arrow_df,
             get_polygon='polygon', get_fill_color='color',
             stroked=False, pickable=True,
+            parameters={'depthTest': False},
         ))
 
     # ── Country anchors: exporter dots (big, coloured) + importer dots ────
@@ -451,6 +454,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
         get_line_color=[15, 23, 42, 255],
         get_radius=55000, radius_min_pixels=3, radius_max_pixels=6,
         stroked=True, line_width_min_pixels=1, pickable=True,
+        parameters={'depthTest': False},
     ))
     layers.append(pdk.Layer(
         'ScatterplotLayer', data=exp_df,
@@ -459,6 +463,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
         get_line_color=[255, 255, 255, 230],
         get_radius=90000, radius_min_pixels=5, radius_max_pixels=9,
         stroked=True, line_width_min_pixels=1.5, pickable=True,
+        parameters={'depthTest': False},
     ))
 
     # ── Labels ─────────────────────────────────────────────────────────────
@@ -483,31 +488,36 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
     return layers
 
 
-# ── Globe basemap ───────────────────────────────────────────────────────────
-# deck.gl's GlobeView doesn't support raster basemaps, so we draw our own:
-# a dark "ocean" polygon that wraps the whole sphere, plus Natural Earth
-# country polygons fetched client-side as GeoJSON.
+# ── Shared basemap ──────────────────────────────────────────────────────────
+# Both projections draw the SAME custom grey earth (no external basemap),
+# so the 2-D and 3-D views are guaranteed to use identical palettes:
+#   ocean #232A33 · land #4B5563 · borders #9CA3AF
+# Country polygons are Natural Earth GeoJSON fetched client-side.
 _NE_COUNTRIES_URL = (
     "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
     "master/geojson/ne_110m_admin_0_countries.geojson"
 )
 
-def _globe_base_layers():
+OCEAN_RGB  = [35, 42, 51]      # #232A33
+LAND_RGB   = [75, 85, 99]      # #4B5563 — grey earth
+BORDER_RGBA = [156, 163, 175, 150]   # #9CA3AF
+
+def _base_layers():
     return [
         pdk.Layer(
             'SolidPolygonLayer',
             data=[{'polygon': [[-180, 90], [0, 90], [180, 90],
                                [180, -90], [0, -90], [-180, -90]]}],
             get_polygon='polygon',
-            get_fill_color=[13, 19, 33],          # deep navy ocean
+            get_fill_color=OCEAN_RGB,
             stroked=False, pickable=False,
         ),
         pdk.Layer(
             'GeoJsonLayer',
             data=_NE_COUNTRIES_URL,
             stroked=True, filled=True,
-            get_fill_color=[33, 42, 58],          # land
-            get_line_color=[78, 92, 115, 170],    # borders
+            get_fill_color=LAND_RGB,
+            get_line_color=BORDER_RGBA,
             line_width_min_pixels=0.6,
             pickable=False,
         ),
@@ -518,11 +528,11 @@ def build_globe_deck(layers, globe=True):
     """
     globe=True  → interactive 3-D globe (deck.gl _GlobeView). The sphere is
                   continuous, so trans-Pacific flows never get cut off.
-    globe=False → flat dark Mercator map (CARTO basemap).
+    globe=False → flat map (standard MapView), same grey-earth base.
     """
     if globe:
         return pdk.Deck(
-            layers=_globe_base_layers() + layers,
+            layers=_base_layers() + layers,
             views=[pdk.View(type="_GlobeView", controller=True)],
             initial_view_state=pdk.ViewState(
                 latitude=18, longitude=115, zoom=0.85,
@@ -532,30 +542,31 @@ def build_globe_deck(layers, globe=True):
             tooltip={'text': '{tooltip}'},
         )
     return pdk.Deck(
-        layers=layers,
+        layers=_base_layers() + layers,
         initial_view_state=pdk.ViewState(
-            latitude=22, longitude=95, zoom=1.7, pitch=0, bearing=0,
+            latitude=22, longitude=95, zoom=1.6, pitch=0, bearing=0,
         ),
-        map_style='https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json',
+        map_provider=None,
         tooltip={'text': '{tooltip}'},
     )
 
 
 def render_flow_map(deck, key, globe=True, height=620):
     """
-    Render a pydeck Deck in Streamlit.
+    Render a pydeck Deck in Streamlit via the standalone HTML export.
 
     IMPORTANT: st.pydeck_chart hardcodes a flat MapView and silently ignores
-    custom `views` (including _GlobeView) and `map_provider=None`. To get a
-    real 3-D globe we therefore render pydeck's standalone HTML export —
-    which fully supports GlobeView — inside an HTML component. Flat mode
-    still uses the native st.pydeck_chart widget.
+    custom `views` (including _GlobeView) and `map_provider=None`, so BOTH
+    projections render through an HTML component. This also keeps the two
+    views pixel-identical in styling. A small CSS injection sets the page
+    background to the ocean colour so there are no white margins.
     """
-    if globe:
-        components.html(deck.to_html(as_string=True, notebook_display=False),
-                        height=height)
-    else:
-        st.pydeck_chart(deck, key=key)
+    html = deck.to_html(as_string=True, notebook_display=False)
+    html = html.replace(
+        "</head>",
+        "<style>body{background:#232A33;margin:0;padding:0;overflow:hidden}</style></head>",
+    )
+    components.html(html, height=height)
 
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
 
@@ -816,12 +827,12 @@ with tab1:
         color_discrete_map=src_hex,
     )
     fig_ts.add_vline(x=year, line_dash='dot',  line_color='#888888', opacity=0.5)
-    fig_ts.add_vline(x=2022, line_dash='dash', line_color='#D85A30', opacity=0.9)
+    fig_ts.add_vline(x=2022, line_dash='dash', line_color='#DC2626', opacity=0.9)
     if not df_trend.empty:
         fig_ts.add_annotation(
             x=2022.05, y=df_trend['value_B'].max()*0.95,
             text="US Export Controls<br>Oct 2022", showarrow=False,
-            font=dict(color='#D85A30', size=11), xanchor='left'
+            font=dict(color='#DC2626', size=11), xanchor='left'
         )
     fig_ts.update_layout(
         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
@@ -943,12 +954,12 @@ with tab1:
         color_discrete_map=equip_src_hex,
     )
     fig_eq_ts.add_vline(x=year, line_dash='dot',  line_color='#888888', opacity=0.5)
-    fig_eq_ts.add_vline(x=2022, line_dash='dash', line_color='#D85A30', opacity=0.9)
+    fig_eq_ts.add_vline(x=2022, line_dash='dash', line_color='#DC2626', opacity=0.9)
     if not df_eq_trend_global.empty:
         fig_eq_ts.add_annotation(
             x=2022.05, y=df_eq_trend_global['value_B'].max()*0.95,
             text="US Export Controls<br>Oct 2022", showarrow=False,
-            font=dict(color='#D85A30', size=11), xanchor='left'
+            font=dict(color='#DC2626', size=11), xanchor='left'
         )
     fig_eq_ts.update_layout(
         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
