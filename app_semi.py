@@ -6,6 +6,7 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import requests
 import math
 import numpy as np
 
@@ -277,6 +278,19 @@ def _mix_with_white(rgb, frac):
     return [int(c + (255 - c) * frac) for c in rgb[:3]]
 
 
+# Flow geometry floats slightly above the earth's surface. Two reasons:
+#   1. It stops z-fighting with the land/ocean polygons (no need to disable
+#      depth testing), and
+#   2. with depth testing ON, the sphere correctly occludes flows on the far
+#      side of the globe — no more phantom "latitude lines" bleeding through.
+# ~80 km is invisible at globe zoom but well clear of the surface; arrows and
+# dots sit progressively higher so they always draw above the ribbons.
+ALT_RIBBON_M = 80_000
+ALT_ARROW_M  = 95_000
+ALT_DOT_M    = 110_000
+ALT_TEXT_M   = 120_000
+
+
 def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
     """
     Expand each flow row into three geometry tables:
@@ -335,8 +349,8 @@ def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
             # lightened toward the head, but that fades the most important
             # end of the flow — especially against a white ocean.)
             segs.append({
-                'src_lon': lon_a, 'src_lat': lat_a,
-                'tgt_lon': lon_b, 'tgt_lat': lat_b,
+                'src_lon': lon_a, 'src_lat': lat_a, 'src_alt': ALT_RIBBON_M,
+                'tgt_lon': lon_b, 'tgt_lat': lat_b, 'tgt_alt': ALT_RIBBON_M,
                 'color':   src_rgb + [245],
                 # Taper: 25% of width at the tail → 100% at the head
                 'width':   width * (0.25 + 0.75 * t_mid),
@@ -349,7 +363,7 @@ def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
             if sub and not globe and abs(lon - sub[-1][0]) > 180:
                 all_paths.append(sub)
                 sub = []
-            sub.append([lon, lat])
+            sub.append([lon, lat, ALT_RIBBON_M])
         all_paths.append(sub)
         for p in all_paths:
             if len(p) > 1:
@@ -378,11 +392,11 @@ def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
         nx, ny = -uy, ux
         a_len  = 0.85 + width * 0.22          # smaller arrows than v1
         a_half = a_len * 0.42
-        tip   = [lon_t + ux * a_len * 0.55, lat_t + uy * a_len * 0.55]
+        tip   = [lon_t + ux * a_len * 0.55, lat_t + uy * a_len * 0.55, ALT_ARROW_M]
         baseL = [lon_t - ux * a_len * 0.45 + nx * a_half,
-                 lat_t - uy * a_len * 0.45 + ny * a_half]
+                 lat_t - uy * a_len * 0.45 + ny * a_half, ALT_ARROW_M]
         baseR = [lon_t - ux * a_len * 0.45 - nx * a_half,
-                 lat_t - uy * a_len * 0.45 - ny * a_half]
+                 lat_t - uy * a_len * 0.45 - ny * a_half, ALT_ARROW_M]
         arrows.append({
             'polygon': [tip, baseL, baseR],
             'color':   src_rgb + [255],
@@ -410,7 +424,6 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
             get_path='path', get_color='color', get_width='width',
             width_units='pixels', cap_rounded=True, joint_rounded=True,
             pickable=False,
-            parameters={'depthTest': False},   # don't z-fight the globe surface
         ))
     layers.append(pdk.Layer(
         'LineLayer', data=seg_df,
@@ -420,14 +433,12 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
         width_units='pixels',
         pickable=True, auto_highlight=True,
         highlight_color=[255, 255, 255, 140],
-        parameters={'depthTest': False},
     ))
     if not arrow_df.empty:
         layers.append(pdk.Layer(
             'PolygonLayer', data=arrow_df,
             get_polygon='polygon', get_fill_color='color',
             stroked=False, pickable=True,
-            parameters={'depthTest': False},
         ))
 
     # ── Country anchors: exporter dots (big, coloured) + importer dots ────
@@ -439,6 +450,8 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
         .reset_index()
     )
     exp_df['fill']    = exp_df['color'].apply(lambda c: list(c)[:3] + [255])
+    exp_df['alt']     = ALT_DOT_M
+    exp_df['alt_txt'] = ALT_TEXT_M
     exp_df['tooltip'] = exp_df.apply(
         lambda r: f"{r['reporterDesc']} (exporter)\n{fmt(r['total'])} total", axis=1)
 
@@ -448,27 +461,27 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
              total=('primaryValue', 'sum'))
         .reset_index()
     )
-    imp_df = imp_df[~imp_df['partnerDesc'].isin(set(exp_df['reporterDesc']))]
+    imp_df = imp_df[~imp_df['partnerDesc'].isin(set(exp_df['reporterDesc']))].copy()
+    imp_df['alt']     = ALT_DOT_M
+    imp_df['alt_txt'] = ALT_TEXT_M
     imp_df['tooltip'] = imp_df.apply(
         lambda r: f"{r['partnerDesc']} (importer)\n{fmt(r['total'])} received", axis=1)
 
     layers.append(pdk.Layer(
         'ScatterplotLayer', data=imp_df,
-        get_position=['lon', 'lat'],
+        get_position=['lon', 'lat', 'alt'],
         get_fill_color=[255, 255, 255, 255],
         get_line_color=[51, 65, 85, 255],
         get_radius=55000, radius_min_pixels=3, radius_max_pixels=6,
         stroked=True, line_width_min_pixels=1, pickable=True,
-        parameters={'depthTest': False},
     ))
     layers.append(pdk.Layer(
         'ScatterplotLayer', data=exp_df,
-        get_position=['lon', 'lat'],
+        get_position=['lon', 'lat', 'alt'],
         get_fill_color='fill',
         get_line_color=[15, 23, 42, 235],
         get_radius=90000, radius_min_pixels=5, radius_max_pixels=9,
         stroked=True, line_width_min_pixels=1.5, pickable=True,
-        parameters={'depthTest': False},
     ))
 
     # ── Labels ─────────────────────────────────────────────────────────────
@@ -476,7 +489,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
     imp_df['label'] = imp_df['partnerDesc']
     layers.append(pdk.Layer(
         'TextLayer', data=imp_df,
-        get_position=['lon', 'lat'], get_text='label',
+        get_position=['lon', 'lat', 'alt_txt'], get_text='label',
         get_color=[71, 85, 105, 255], get_size=11,
         get_pixel_offset=[0, -14],
         font_family='Arial', font_weight=600,
@@ -484,7 +497,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
     ))
     layers.append(pdk.Layer(
         'TextLayer', data=exp_df,
-        get_position=['lon', 'lat'], get_text='label',
+        get_position=['lon', 'lat', 'alt_txt'], get_text='label',
         get_color=[15, 23, 42, 255], get_size=14,
         get_pixel_offset=[0, -16],
         font_family='Arial', font_weight=700,
@@ -505,12 +518,45 @@ _NE_COUNTRIES_URL = (
 
 OCEAN_RGB   = [255, 255, 255]        # white ocean
 LAND_RGB    = [185, 196, 209]        # #B9C4D1 — grey earth
+SHADOW_RGB  = [134, 148, 165]        # land drop-shadow (paper-cutout depth)
 BORDER_RGBA = [255, 255, 255, 210]   # crisp white borders on grey land
 FRAME_HEX   = "#E2E8F0"              # page bg behind the map/globe, so the
                                      # white ocean reads as a distinct shape
 
+
+@st.cache_data(show_spinner=False)
+def _load_world_geojson():
+    """
+    Fetch Natural Earth countries once server-side (cached) and build a
+    second, slightly offset copy used as a drop shadow beneath the land —
+    a subtle paper-cutout texture that makes the earth feel layered without
+    relying on raster imagery. Returns (countries, shadow); on any network
+    failure returns (URL, None) so the map still renders, just shadowless.
+    """
+    import copy
+    try:
+        gj = requests.get(_NE_COUNTRIES_URL, timeout=15).json()
+    except Exception:
+        return _NE_COUNTRIES_URL, None
+
+    DLON, DLAT = 0.55, -0.45          # shadow cast toward bottom-right
+
+    def _shift(coords):
+        if isinstance(coords[0], (int, float)):
+            return [coords[0] + DLON, coords[1] + DLAT]
+        return [_shift(c) for c in coords]
+
+    shadow = copy.deepcopy(gj)
+    for feat in shadow.get("features", []):
+        geom = feat.get("geometry") or {}
+        if geom.get("coordinates"):
+            geom["coordinates"] = _shift(geom["coordinates"])
+    return gj, shadow
+
+
 def _base_layers():
-    return [
+    countries, shadow = _load_world_geojson()
+    layers = [
         pdk.Layer(
             'SolidPolygonLayer',
             data=[{'polygon': [[-180, 90], [0, 90], [180, 90],
@@ -519,16 +565,25 @@ def _base_layers():
             get_fill_color=OCEAN_RGB,
             stroked=False, pickable=False,
         ),
-        pdk.Layer(
-            'GeoJsonLayer',
-            data=_NE_COUNTRIES_URL,
-            stroked=True, filled=True,
-            get_fill_color=LAND_RGB,
-            get_line_color=BORDER_RGBA,
-            line_width_min_pixels=0.6,
-            pickable=False,
-        ),
     ]
+    if shadow is not None:
+        layers.append(pdk.Layer(
+            'GeoJsonLayer',
+            data=shadow,
+            stroked=False, filled=True,
+            get_fill_color=SHADOW_RGB + [110],
+            pickable=False,
+        ))
+    layers.append(pdk.Layer(
+        'GeoJsonLayer',
+        data=countries,
+        stroked=True, filled=True,
+        get_fill_color=LAND_RGB,
+        get_line_color=BORDER_RGBA,
+        line_width_min_pixels=0.6,
+        pickable=False,
+    ))
+    return layers
 
 
 def build_globe_deck(layers, globe=True):
@@ -571,7 +626,9 @@ def render_flow_map(deck, key, globe=True, height=620):
     html = deck.to_html(as_string=True, notebook_display=False)
     html = html.replace(
         "</head>",
-        f"<style>body{{background:{FRAME_HEX};margin:0;padding:0;overflow:hidden}}</style></head>",
+        f"<style>body{{background:radial-gradient(ellipse at center, "
+        f"#F8FAFC 0%, {FRAME_HEX} 62%, #CBD5E1 100%);"
+        f"margin:0;padding:0;overflow:hidden}}</style></head>",
     )
     components.html(html, height=height)
 
