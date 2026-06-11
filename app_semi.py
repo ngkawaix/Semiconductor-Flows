@@ -207,6 +207,39 @@ def hex_to_rgba(hex_color, alpha=0.45):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
+def build_arc_layers(df, color_col='color', width_col='width'):
+    """Two-layer glow effect: transparent wide halo + bright narrow core."""
+    df = df.copy()
+    df['_glow_color'] = df[color_col].apply(
+        lambda c: [c[0], c[1], c[2], 30]   # same RGB, very low alpha for halo
+    )
+    df['_glow_width'] = df[width_col] * 5   # halo is 5× the core width
+
+    glow_layer = pdk.Layer(
+        'ArcLayer', data=df,
+        get_source_position=['source_lon', 'source_lat'],
+        get_target_position=['target_lon', 'target_lat'],
+        get_source_color='_glow_color',
+        get_target_color='_glow_color',
+        get_width='_glow_width',
+        get_height=1.3,
+        great_circle=True,
+        pickable=False,
+    )
+    core_layer = pdk.Layer(
+        'ArcLayer', data=df,
+        get_source_position=['source_lon', 'source_lat'],
+        get_target_position=['target_lon', 'target_lat'],
+        get_source_color=color_col,
+        get_target_color=color_col,
+        get_width=width_col,
+        get_height=1.3,
+        great_circle=True,
+        pickable=True,
+        auto_highlight=True,
+    )
+    return [glow_layer, core_layer]
+
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
 
 def build_sankey_fig(df_flow, hex_palette):
@@ -397,14 +430,8 @@ with tab1:
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
             pdk.Deck(
-                layers=[pdk.Layer(
-                    'ArcLayer', data=df_year,
-                    get_source_position=['source_lon','source_lat'],
-                    get_target_position=['target_lon','target_lat'],
-                    get_source_color='color', get_target_color='color',
-                    get_width='width', pickable=True, auto_highlight=True,
-                )],
-                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=20),
+                layers=build_arc_layers(df_year),
+                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=35),
                 map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
                 tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
             ),
@@ -529,14 +556,8 @@ with tab1:
         df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
             pdk.Deck(
-                layers=[pdk.Layer(
-                    'ArcLayer', data=df_eq_year,
-                    get_source_position=['source_lon','source_lat'],
-                    get_target_position=['target_lon','target_lat'],
-                    get_source_color='color', get_target_color='color',
-                    get_width='width', pickable=True, auto_highlight=True,
-                )],
-                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=20),
+                layers=build_arc_layers(df_eq_year),
+                initial_view_state=pdk.ViewState(latitude=25, longitude=60, zoom=2, pitch=35),
                 map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
                 tooltip={'text': '{reporterDesc} → {partnerDesc}\n{value_fmt}'}
             ),
