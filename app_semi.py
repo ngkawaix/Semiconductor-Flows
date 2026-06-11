@@ -232,38 +232,56 @@ def _wrap_lon(lon):
     return ((lon + 180.0) % 360.0) - 180.0
 
 
-def _flow_path(lat1, lon1, lat2, lon2, bow_deg, n=60):
+def _flow_path(lat1, lon1, lat2, lon2, bow_deg, n=24):
     """
-    Quadratic Bezier from (lat1,lon1) to (lat2,lon2), bowed sideways by
-    bow_deg degrees, returned as a list of (wrapped_lon, lat) tuples.
+    Great-circle path from (lat1,lon1) to (lat2,lon2) with a sideways bow,
+    returned as a list of (wrapped_lon, lat) tuples.
 
-    Bezier formula (t goes 0 → 1 along the curve):
-        P(t) = (1-t)^2 * P0  +  2(1-t)t * C  +  t^2 * P1
-    where P0 = source, P1 = target, and C = control point = the midpoint
-    pushed perpendicular to the straight line by bow_deg. Positive bow bows
-    the curve to the LEFT of the direction of travel, so all flows share a
-    consistent, organised sweep. The target longitude is first "unwrapped"
-    to its nearest representation so trans-Pacific flows take the short way.
+    The base path is a spherical linear interpolation (slerp) between the two
+    points' 3-D unit vectors — i.e. the true shortest route over the sphere.
+    This matters on the orthographic globe: a Bezier in lon/lat space hugs
+    latitude circles and makes long flows look like they circumnavigate the
+    planet, whereas the great circle takes the natural arc (e.g. Amsterdam →
+    Taipei over Siberia). It also produces shorter on-screen paths = less SVG.
+
+    The bow is then applied as a lateral offset perpendicular to the local
+    path direction, scaled by sin(pi*t) so it peaks mid-flight and vanishes
+    at both endpoints — preserving the organised fan-out of converging flows.
     """
-    if lon2 - lon1 > 180:
-        lon2 -= 360
-    elif lon2 - lon1 < -180:
-        lon2 += 360
-
-    dx, dy = lon2 - lon1, lat2 - lat1
-    dist = math.hypot(dx, dy)
-    if dist < 1e-6:
+    la1, lo1 = math.radians(lat1), math.radians(lon1)
+    la2, lo2 = math.radians(lat2), math.radians(lon2)
+    v1 = (math.cos(la1) * math.cos(lo1), math.cos(la1) * math.sin(lo1), math.sin(la1))
+    v2 = (math.cos(la2) * math.cos(lo2), math.cos(la2) * math.sin(lo2), math.sin(la2))
+    dot = max(-1.0, min(1.0, v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]))
+    omega = math.acos(dot)
+    if omega < 1e-9:
         return []
+    sin_om = math.sin(omega)
 
-    px, py = -dy / dist, dx / dist
-    cx = (lon1 + lon2) / 2 + px * bow_deg
-    cy = (lat1 + lat2) / 2 + py * bow_deg
-
-    pts = []
+    base = []
     for i in range(n + 1):
         t = i / n
-        lon = (1 - t) ** 2 * lon1 + 2 * (1 - t) * t * cx + t ** 2 * lon2
-        lat = (1 - t) ** 2 * lat1 + 2 * (1 - t) * t * cy + t ** 2 * lat2
+        a = math.sin((1 - t) * omega) / sin_om
+        b = math.sin(t * omega) / sin_om
+        x, y, z = (a*v1[0] + b*v2[0], a*v1[1] + b*v2[1], a*v1[2] + b*v2[2])
+        lat = math.degrees(math.asin(max(-1.0, min(1.0, z))))
+        lon = math.degrees(math.atan2(y, x))
+        base.append((lon, lat))
+
+    # Lateral bow: offset perpendicular to local direction, peaking mid-path
+    pts = []
+    for i, (lon, lat) in enumerate(base):
+        t = i / n
+        j0, j1 = max(0, i - 1), min(n, i + 1)
+        dx = base[j1][0] - base[j0][0]
+        if dx > 180:    dx -= 360
+        elif dx < -180: dx += 360
+        dy = base[j1][1] - base[j0][1]
+        d = math.hypot(dx, dy)
+        if d > 1e-9:
+            nx, ny = -dy / d, dx / d
+            off = bow_deg * math.sin(math.pi * t)
+            lon, lat = lon + nx * off, lat + ny * off
         pts.append((_wrap_lon(lon), max(-85.0, min(85.0, lat))))
     return pts
 
@@ -282,7 +300,7 @@ def build_flow_fig(df, globe=True, height=620,
     """
     fig = go.Figure()
 
-    # Per-destination rank → bow multiplier
+    # Per-destination rank → bow multiplier (fan-out of converging flows)
     bow_mult = {}
     for _, grp in df.groupby('partnerISO'):
         grp_sorted = grp.sort_values(width_col, ascending=False)
@@ -290,54 +308,57 @@ def build_flow_fig(df, globe=True, height=620,
             step = (rank + 1) // 2 * 0.35
             bow_mult[idx] = 1.0 + step if rank % 2 == 1 else 1.0 - step
 
-    # Draw all halos first (under every core line)
-    flows = []
-    for idx, row in df.iterrows():
-        dlon = row['target_lon'] - row['source_lon']
-        if dlon > 180:    dlon -= 360
-        elif dlon < -180: dlon += 360
-        dist = math.hypot(dlon, row['target_lat'] - row['source_lat'])
-        bow  = max(1.2, min(dist * 0.12, 11.0)) * bow_mult.get(idx, 1.0)
+    # ── Build geometry, GROUPED BY EXPORTER ────────────────────────────────
+    # Performance: scattergeo is SVG, and drag-rotation re-projects every
+    # trace on every frame. One trace per flow (the naive approach) means
+    # 50+ DOM paths for 25 flows. All flows from one exporter share a colour,
+    # so we merge them into ONE halo trace + ONE core trace per exporter,
+    # separated by None gaps — ~12 traces total. Line width is per-trace, so
+    # within each exporter we use its value-weighted mean width; relative
+    # importance across flows is still carried by the arrowhead size.
+    for rep, grp in df.groupby('reporterDesc', sort=False):
+        lons, lats, texts, sizes = [], [], [], []
+        r, g, b = list(grp.iloc[0][color_col])[:3]
+        for idx, row in grp.iterrows():
+            dlon = row['target_lon'] - row['source_lon']
+            if dlon > 180:    dlon -= 360
+            elif dlon < -180: dlon += 360
+            dist = math.hypot(dlon, row['target_lat'] - row['source_lat'])
+            bow  = max(1.0, min(dist * 0.10, 8.0)) * bow_mult.get(idx, 1.0)
 
-        pts = _flow_path(row['source_lat'], row['source_lon'],
-                         row['target_lat'], row['target_lon'], bow_deg=bow)
-        if not pts:
-            continue
-
-        # Insert a None break where the wrapped path jumps the antimeridian
-        # (keeps flat projections clean; on the globe the gap is negligible)
-        lons, lats = [], []
-        for j, (lon, lat) in enumerate(pts):
-            if j and abs(lon - lons[-1] if lons[-1] is not None else 0) > 180:
+            pts = _flow_path(row['source_lat'], row['source_lon'],
+                             row['target_lat'], row['target_lon'], bow_deg=bow)
+            if not pts:
+                continue
+            hover = (f"{row.get('reporterDesc','')} → {row.get('partnerDesc','')}"
+                     f"<br><b>{row.get('value_fmt','')}</b>")
+            if lons:                       # gap between flows in the merged trace
                 lons.append(None); lats.append(None)
-            lons.append(lon); lats.append(lat)
+                texts.append(''); sizes.append(0)
+            for j, (lon, lat) in enumerate(pts):
+                if j and lons[-1] is not None and abs(lon - lons[-1]) > 180:
+                    lons.append(None); lats.append(None)   # antimeridian break
+                    texts.append(''); sizes.append(0)
+                lons.append(lon); lats.append(lat)
+                texts.append(hover); sizes.append(0)
+            # Arrowhead at this flow's destination, sized by its own value
+            sizes[-1] = max(8, float(row[width_col]) * 2.4 + 4)
 
-        r, g, b = list(row[color_col])[:3]
-        flows.append(dict(
-            lons=lons, lats=lats, rgb=(r, g, b),
-            width=float(row[width_col]),
-            hover=f"{row.get('reporterDesc','')} → {row.get('partnerDesc','')}"
-                  f"<br><b>{row.get('value_fmt','')}</b>",
-        ))
-
-    for f in flows:                                            # halo pass
-        r, g, b = f['rgb']
-        fig.add_trace(go.Scattergeo(
-            lon=f['lons'], lat=f['lats'], mode='lines',
-            line=dict(width=f['width'] * 2.2, color=f"rgba({r},{g},{b},0.22)"),
+        if not lons:
+            continue
+        w = float(np.sqrt((grp[width_col] ** 2 *
+                           grp['primaryValue']).sum() / grp['primaryValue'].sum()))
+        fig.add_trace(go.Scattergeo(                       # halo
+            lon=lons, lat=lats, mode='lines',
+            line=dict(width=w * 2.0, color=f"rgba({r},{g},{b},0.20)"),
             hoverinfo='skip', showlegend=False,
         ))
-    for f in flows:                                            # core + arrow
-        r, g, b = f['rgb']
-        n = len(f['lons'])
-        sizes = [0] * n
-        sizes[-1] = max(9, f['width'] * 2.4 + 5)               # arrowhead only at the destination
-        fig.add_trace(go.Scattergeo(
-            lon=f['lons'], lat=f['lats'], mode='lines+markers',
-            line=dict(width=f['width'], color=f"rgba({r},{g},{b},0.95)"),
+        fig.add_trace(go.Scattergeo(                       # core + arrowheads
+            lon=lons, lat=lats, mode='lines+markers',
+            line=dict(width=w, color=f"rgba({r},{g},{b},0.95)"),
             marker=dict(symbol='arrow', size=sizes, angleref='previous',
                         color=f"rgba({r},{g},{b},1)"),
-            hoverinfo='text', text=f['hover'], showlegend=False,
+            hoverinfo='text', text=texts, showlegend=False,
         ))
 
     # ── Country anchors ─────────────────────────────────────────────────────
@@ -399,6 +420,8 @@ def build_flow_fig(df, globe=True, height=620,
         height=height,
         showlegend=False,
         hoverlabel=dict(bgcolor='white', font=dict(color='#0F172A')),
+        # Keep the user's rotation/zoom when widgets trigger a re-render
+        uirevision='flow-map',
     )
     return fig
 
