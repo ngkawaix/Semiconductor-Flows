@@ -15,6 +15,13 @@ st.set_page_config(
 )
 
 # ── Data loading ───────────────────────────────────────────────────────────
+# Canonical Comtrade → display name mapping applied uniformly across all loaders
+_COMTRADE_RENAME = {
+    'Other Asia, nes':      'Taiwan',        # Comtrade lists Taiwan under this code
+    'China, Hong Kong SAR': 'Hong Kong',     # Shorten for map labels
+    'Viet Nam':             'Vietnam',       # Localise spelling
+}
+
 @st.cache_data
 def load_global_data():
     key   = st.secrets["COMTRADE_KEY"]
@@ -30,8 +37,8 @@ def load_global_data():
     cols = ['reporterDesc','reporterISO','partnerDesc','partnerISO','period','primaryValue']
     df   = df[cols].copy()
     df   = df[df['partnerISO'] != 'W00']
-    df['reporterDesc'] = df['reporterDesc'].replace('Other Asia, nes', 'Taiwan')
-    df['partnerDesc']  = df['partnerDesc'].replace('Other Asia, nes', 'Taiwan')
+    df['reporterDesc'] = df['reporterDesc'].replace(_COMTRADE_RENAME)
+    df['partnerDesc']  = df['partnerDesc'].replace(_COMTRADE_RENAME)
     df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
     return df
 
@@ -51,8 +58,33 @@ def load_global_equip_data():
     cols = ['reporterDesc','reporterISO','partnerDesc','partnerISO','period','primaryValue']
     df   = df[cols].copy()
     df   = df[df['partnerISO'] != 'W00']
-    df['reporterDesc'] = df['reporterDesc'].replace('Other Asia, nes', 'Taiwan')
-    df['partnerDesc']  = df['partnerDesc'].replace('Other Asia, nes', 'Taiwan')
+    df['reporterDesc'] = df['reporterDesc'].replace(_COMTRADE_RENAME)
+    df['partnerDesc']  = df['partnerDesc'].replace(_COMTRADE_RENAME)
+    df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
+    return df
+
+@st.cache_data
+def load_reexport_data():
+    """HS 8542: IC exports from key intermediate re-export / transit hubs.
+    These countries receive chips from primary exporters and onward-ship
+    to final assembly markets. Showing their outbound flows reveals the
+    second hop of the supply chain (Singapore → Mexico, HK → SE Asia, etc.)
+    """
+    key   = st.secrets["COMTRADE_KEY"]
+    years = ','.join(str(y) for y in range(2018, 2026))
+    df    = comtrade.getFinalData(
+        key, typeCode='C', freqCode='A', clCode='HS', period=years,
+        reporterCode='344,458,702,704',   # HKG, MYS, SGP, VNM
+        cmdCode='8542', flowCode='X',
+        partnerCode=None, partner2Code=None, customsCode=None, motCode=None,
+        maxRecords=250000, format_output='JSON', aggregateBy=None,
+        breakdownMode='classic', countOnly=None, includeDesc=True
+    )
+    cols = ['reporterDesc','reporterISO','partnerDesc','partnerISO','period','primaryValue']
+    df   = df[cols].copy()
+    df   = df[df['partnerISO'] != 'W00']
+    df['reporterDesc'] = df['reporterDesc'].replace(_COMTRADE_RENAME)
+    df['partnerDesc']  = df['partnerDesc'].replace(_COMTRADE_RENAME)
     df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
     return df
 
@@ -129,10 +161,30 @@ country_rgba = {
     'Japan':         [101, 163,  13, 210],
     'Germany':       [124,  58, 237, 210],
 }
-IC_EXPORTERS    = ['Taiwan', 'Rep. of Korea', 'China', 'USA', 'Japan']
-EQUIP_EXPORTERS = ['Netherlands', 'USA', 'Japan', 'Germany', 'Rep. of Korea']
+IC_EXPORTERS    = ['China', 'Japan', 'Rep. of Korea', 'Taiwan', 'USA']
+EQUIP_EXPORTERS = ['Germany', 'Japan', 'Netherlands', 'Rep. of Korea', 'USA']
 src_hex       = {k: country_hex[k] for k in IC_EXPORTERS}
 equip_src_hex = {k: country_hex[k] for k in EQUIP_EXPORTERS}
+
+# ── Re-export hub palette ───────────────────────────────────────────────────
+# Intermediate transit / OSAT hubs that receive chips from primary exporters
+# and forward them to final assembly markets.  Distinct from the main palette.
+REEXPORT_HUBS = ['Hong Kong', 'Malaysia', 'Singapore', 'Vietnam']   # alphabetical
+hub_hex = {
+    'Hong Kong': '#EC4899',   # pink-500
+    'Malaysia':  '#10B981',   # emerald-500
+    'Singapore': '#F59E0B',   # amber-500
+    'Vietnam':   '#8B5CF6',   # purple-500
+}
+hub_rgba = {
+    'Hong Kong': [236,  72, 153, 210],
+    'Malaysia':  [ 16, 185, 129, 210],
+    'Singapore': [245, 158,  11, 210],
+    'Vietnam':   [139,  92, 246, 210],
+}
+# Unified lookup used by Sankey destination coloring so the SAME country
+# always gets the same colour regardless of which Sankey it appears in.
+ALL_COUNTRY_HEX = {**country_hex, **hub_hex}
 status_colours = {
     'Rising Hub':         '#1d91c0',
     'Assembly Dependent': '#41b6c4',
@@ -411,9 +463,23 @@ def build_sankey_fig(df_flow, hex_palette):
     all_nodes = src_nodes + tgt_nodes
     node_idx  = {n: i for i, n in enumerate(all_nodes)}
     n_tgt = len(tgt_nodes)
+
+    # Destination node colours: use the canonical country palette for any
+    # country we recognise (so China is always red, Korea always teal, etc.
+    # across BOTH the IC and Equipment Sankeys), then fall back to the
+    # YlGnBu sequential palette for all-other importers.
+    _fb_idx = 0
+    tgt_colors = []
+    for t in tgt_nodes:
+        if t in ALL_COUNTRY_HEX:
+            tgt_colors.append(ALL_COUNTRY_HEX[t])
+        else:
+            tgt_colors.append(_YLGNBU_DEST[_fb_idx % len(_YLGNBU_DEST)])
+            _fb_idx += 1
+
     node_colors = (
         [hex_palette.get(n, '#888888') for n in src_nodes] +
-        [_YLGNBU_DEST[i % len(_YLGNBU_DEST)] for i in range(n_tgt)]
+        tgt_colors
     )
     link_sources = [node_idx[r] for r in df_flow['reporterDesc']]
     link_targets  = [node_idx[t] for t in df_flow['partnerDesc']]
@@ -491,13 +557,15 @@ with st.spinner("Loading UN Comtrade data. This may take a moment on first load.
     df_global_equip = load_global_equip_data()
     df_equip        = load_asean_equip()
     df_chips        = load_asean_chips()
+    df_reexport     = load_reexport_data()   # IC exports from intermediate hubs (SGP, HKG, MYS, VNM)
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 st.sidebar.title("Controls")
 st.sidebar.markdown("### IC Exporters")
 st.sidebar.caption("Applies to the IC section of Tab 1.")
 selected_countries = []
-for country, hex_c in src_hex.items():
+for country in IC_EXPORTERS:          # alphabetical: China, Japan, Korea, Taiwan, USA
+    hex_c = src_hex[country]
     if st.sidebar.checkbox(country, value=True, key=f"toggle_{country}"):
         selected_countries.append(country)
 
@@ -505,9 +573,23 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### Equipment Exporters")
 st.sidebar.caption("Applies to the Equipment section of Tab 1.")
 selected_equip_countries = []
-for country, hex_c in equip_src_hex.items():
+for country in EQUIP_EXPORTERS:       # alphabetical: Germany, Japan, Netherlands, Korea, USA
+    hex_c = equip_src_hex[country]
     if st.sidebar.checkbox(country, value=True, key=f"eq_toggle_{country}"):
         selected_equip_countries.append(country)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Re-export Hubs")
+st.sidebar.caption(
+    "Overlay IC re-export flows (HS 8542) from key intermediate hubs onto the IC map. "
+    "These countries receive chips from primary exporters and forward them to final "
+    "assembly markets — revealing the second hop of the supply chain."
+)
+selected_hubs = []
+for hub in REEXPORT_HUBS:             # alphabetical: Hong Kong, Malaysia, Singapore, Vietnam
+    colour_swatch = hub_hex[hub]
+    if st.sidebar.checkbox(hub, value=False, key=f"hub_{hub}"):
+        selected_hubs.append(hub)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Select Year")
@@ -640,16 +722,66 @@ with tab1:
         global_max_ic = df_arcs['primaryValue'].max()
         df_year['width'] = (np.sqrt(df_year['primaryValue'] / global_max_ic) * 6).clip(lower=1.0)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
+
+        # ── Re-export hub overlay ─────────────────────────────────────────
+        # When hubs are toggled on, build their outbound arc dataset and
+        # layer it on top of the primary exporter flows.  Same global_max_ic
+        # normalisation ensures hub ribbons are visually proportional
+        # (hub volumes are smaller, so arcs naturally appear thinner).
+        df_hub_ic = pd.DataFrame()
+        if selected_hubs and not df_reexport.empty:
+            _hub_arcs = (
+                df_reexport
+                .merge(
+                    coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}),
+                    on='reporterISO', how='inner'
+                )
+                .merge(
+                    coords_df.rename(columns={'ISO':'partnerISO','lat':'target_lat','lon':'target_lon'}),
+                    on='partnerISO', how='inner'
+                )
+                .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
+                          'period','source_lat','source_lon','target_lat','target_lon'])
+                ['primaryValue'].sum().reset_index()
+            )
+            _hub_yr = _hub_arcs[
+                (_hub_arcs['period'] == str(year)) &
+                (_hub_arcs['reporterDesc'].isin(selected_hubs))
+            ].copy()
+            if not _hub_yr.empty:
+                # Cap at top-8 destinations per hub combined to keep the map legible
+                _top_dest = set(
+                    _hub_yr.groupby('partnerISO')['primaryValue'].sum().nlargest(8).index
+                )
+                _hub_yr = _hub_yr[_hub_yr['partnerISO'].isin(_top_dest)]
+                _hub_yr['color']     = _hub_yr['reporterDesc'].map(hub_rgba)
+                _hub_yr['width']     = (np.sqrt(_hub_yr['primaryValue'] / global_max_ic) * 6).clip(lower=1.0)
+                _hub_yr['value_fmt'] = _hub_yr['primaryValue'].apply(fmt)
+                df_hub_ic = _hub_yr
+
+        # Merge primary and hub flows into a single figure
+        df_ic_plot = (
+            pd.concat([df_year, df_hub_ic], ignore_index=True)
+            if not df_hub_ic.empty else df_year
+        )
+
+        _hub_key = '_'.join(sorted(selected_hubs)) if selected_hubs else 'none'
         st.plotly_chart(
-            build_flow_fig(df_year, globe=use_globe),
-            key=f"arc_map_{year}_{projection}_{'_'.join(sorted(selected_countries))}",
+            build_flow_fig(df_ic_plot, globe=use_globe),
+            key=f"arc_map_{year}_{projection}_{'_'.join(sorted(selected_countries))}_{_hub_key}",
             width='stretch',
+        )
+        _hub_note = (
+            " **Hub re-export arcs** (amber/pink/green/purple) show IC exports from "
+            "the selected intermediate hubs to their top destinations."
+            if selected_hubs else ""
         )
         st.caption(
             "**How to read this map** — Each line is an export flow; the arrowhead sits at the "
             "importer. Width ∝ √(trade value), colour = exporting country. "
             + ("Drag to rotate the globe; " if use_globe else "")
             + "hover any flow or dot for exact values."
+            + _hub_note
         )
     else:
         st.info("Select at least one IC exporter in the sidebar to display the map.")
