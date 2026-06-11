@@ -264,7 +264,7 @@ def _flow_path(lat1, lon1, lat2, lon2, bow_deg, n=60):
         t = i / n
         lon = (1 - t) ** 2 * lon1 + 2 * (1 - t) * t * cx + t ** 2 * lon2
         lat = (1 - t) ** 2 * lat1 + 2 * (1 - t) * t * cy + t ** 2 * lat2
-        pts.append((_wrap_lon(lon), lat, t))
+        pts.append((_wrap_lon(lon), max(-85.0, min(85.0, lat)), t))
     return pts
 
 
@@ -273,39 +273,42 @@ def _mix_with_white(rgb, frac):
     return [int(c + (255 - c) * frac) for c in rgb[:3]]
 
 
-def _build_flow_geometry(df, color_col='color', width_col='width'):
+def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
     """
-    Expand each flow row into:
-      seg_df   — short line segments with per-segment width (taper) and
-                 colour (slight lightening toward the head)
-      arrow_df — one triangle polygon per flow, placed at the destination
-      Plus hub/label dataframes for exporters and importers.
+    Expand each flow row into three geometry tables:
+      seg_df   — short line segments for the CORE ribbon, with per-segment
+                 width (taper: thin tail → wide head) and a slight
+                 lightening of the colour toward the head
+      path_df  — ONE continuous path per flow for the HALO glow. Using a
+                 single PathLayer path instead of stacked segments avoids
+                 the dark "smudge" artefact where overlapping low-alpha
+                 segment joints double up
+      arrow_df — one triangle polygon per flow at the destination
 
-    Curvature separation: flows converging on the same destination are
-    ranked by value; each rank gets a slightly different bow magnitude so
-    the ribbons fan apart mid-flight instead of stacking into one rope,
-    while still arriving at the same point from distinct angles.
+    globe=True: coordinates feed deck.gl's spherical GlobeView, which is
+    continuous — no antimeridian exists, so nothing is skipped or split.
+    globe=False: flat Mercator — segments that jump >180° are skipped and
+    halo paths are split into sub-paths at the jump.
     """
     N_PTS = 60
 
-    # Per-destination rank → bow multiplier
+    # Per-destination rank → bow multiplier so converging flows fan apart
     bow_mult = {}
     for _, grp in df.groupby('partnerISO'):
         grp_sorted = grp.sort_values(width_col, ascending=False)
         for rank, idx in enumerate(grp_sorted.index):
-            # 1.0, 1.35, 0.65, 1.7, 0.30 … alternate around the base bow
             step = (rank + 1) // 2 * 0.35
             bow_mult[idx] = 1.0 + step if rank % 2 == 1 else 1.0 - step
 
-    segs, arrows = [], []
+    segs, halo_paths, arrows = [], [], []
 
     for idx, row in df.iterrows():
-        # Base bow grows with distance, capped so short hops stay subtle
         dlon = row['target_lon'] - row['source_lon']
-        if dlon > 180:   dlon -= 360
+        if dlon > 180:    dlon -= 360
         elif dlon < -180: dlon += 360
         dist = math.hypot(dlon, row['target_lat'] - row['source_lat'])
-        bow  = max(1.5, min(dist * 0.16, 16.0)) * bow_mult.get(idx, 1.0)
+        # Gentler bow than before — long flows stay closer to their geodesic
+        bow  = max(1.2, min(dist * 0.12, 11.0)) * bow_mult.get(idx, 1.0)
 
         pts = _flow_path(row['source_lat'], row['source_lon'],
                          row['target_lat'], row['target_lon'],
@@ -313,45 +316,61 @@ def _build_flow_geometry(df, color_col='color', width_col='width'):
         if not pts:
             continue
 
-        src_rgb  = list(row[color_col])[:3]
-        width    = float(row[width_col])
-        tooltip  = f"{row.get('reporterDesc','')} → {row.get('partnerDesc','')}\n{row.get('value_fmt','')}"
+        src_rgb = list(row[color_col])[:3]
+        width   = float(row[width_col])
+        tooltip = f"{row.get('reporterDesc','')} → {row.get('partnerDesc','')}\n{row.get('value_fmt','')}"
 
+        # ── Core ribbon segments (tapered) ─────────────────────────────────
         for i in range(len(pts) - 1):
             lon_a, lat_a, t_a = pts[i]
             lon_b, lat_b, t_b = pts[i + 1]
-            if abs(lon_b - lon_a) > 180:        # antimeridian jump → skip
+            if not globe and abs(lon_b - lon_a) > 180:
                 continue
             t_mid = (t_a + t_b) / 2
-            rgb   = _mix_with_white(src_rgb, 0.30 * t_mid)
+            rgb   = _mix_with_white(src_rgb, 0.28 * t_mid)
             segs.append({
                 'src_lon': lon_a, 'src_lat': lat_a,
                 'tgt_lon': lon_b, 'tgt_lat': lat_b,
-                'color':      rgb + [235],
-                'halo_color': rgb + [45],
-                # Taper: 30% width at the tail → 100% at the head
-                'width':      width * (0.30 + 0.70 * t_mid),
-                'halo_width': width * (0.30 + 0.70 * t_mid) * 3.0,
-                'tooltip':    tooltip,
+                'color':   rgb + [230],
+                # Taper: 25% of width at the tail → 100% at the head
+                'width':   width * (0.25 + 0.75 * t_mid),
+                'tooltip': tooltip,
             })
 
-        # ── Arrowhead at the destination ──────────────────────────────────
-        # Walk back from the end to find the last contiguous (no-jump) pair
+        # ── Halo path(s): one continuous path per flow ──────────────────────
+        sub, all_paths = [], []
+        for lon, lat, _t in pts:
+            if sub and not globe and abs(lon - sub[-1][0]) > 180:
+                all_paths.append(sub)
+                sub = []
+            sub.append([lon, lat])
+        all_paths.append(sub)
+        for p in all_paths:
+            if len(p) > 1:
+                halo_paths.append({
+                    'path':    p,
+                    'color':   src_rgb + [38],
+                    'width':   width * 2.1,
+                    'tooltip': tooltip,
+                })
+
+        # ── Arrowhead at the destination ────────────────────────────────────
         tip_i = len(pts) - 1
-        while tip_i > 0 and abs(pts[tip_i][0] - pts[tip_i - 1][0]) > 180:
+        while tip_i > 0 and not globe and abs(pts[tip_i][0] - pts[tip_i - 1][0]) > 180:
             tip_i -= 1
         if tip_i == 0:
             continue
         lon_t, lat_t, _ = pts[tip_i]
         lon_p, lat_p, _ = pts[tip_i - 1]
         ddx, ddy = lon_t - lon_p, lat_t - lat_p
+        if abs(ddx) > 180:        # rare globe-mode wrap in final pair
+            ddx -= math.copysign(360, ddx)
         d = math.hypot(ddx, ddy)
         if d < 1e-9:
             continue
-        ux, uy = ddx / d, ddy / d            # unit direction of travel
-        nx, ny = -uy, ux                     # unit normal
-        # Arrow size scales gently with ribbon width (degrees at zoom ~2)
-        a_len  = 1.1 + width * 0.28
+        ux, uy = ddx / d, ddy / d
+        nx, ny = -uy, ux
+        a_len  = 0.85 + width * 0.22          # smaller arrows than v1
         a_half = a_len * 0.42
         tip   = [lon_t + ux * a_len * 0.55, lat_t + uy * a_len * 0.55]
         baseL = [lon_t - ux * a_len * 0.45 + nx * a_half,
@@ -360,42 +379,41 @@ def _build_flow_geometry(df, color_col='color', width_col='width'):
                  lat_t - uy * a_len * 0.45 - ny * a_half]
         arrows.append({
             'polygon': [tip, baseL, baseR],
-            'color':   _mix_with_white(src_rgb, 0.30) + [255],
+            'color':   _mix_with_white(src_rgb, 0.28) + [255],
             'tooltip': tooltip,
         })
 
-    return pd.DataFrame(segs), pd.DataFrame(arrows)
+    return pd.DataFrame(segs), pd.DataFrame(halo_paths), pd.DataFrame(arrows)
 
 
-def build_arc_layers(df, color_col='color', width_col='width'):
+def build_arc_layers(df, color_col='color', width_col='width', globe=False):
     """
     Build the full layer stack for one flow map:
-      halo ribbons → core ribbons → arrowheads → country dots → labels
+      halo paths → core ribbons → arrowheads → country dots → labels
     Returned in draw order (first = bottom).
     """
-    seg_df, arrow_df = _build_flow_geometry(df, color_col, width_col)
+    seg_df, path_df, arrow_df = _build_flow_geometry(df, color_col, width_col, globe=globe)
     if seg_df.empty:
         return []
 
-    pos_src = ['src_lon', 'src_lat']
-    pos_tgt = ['tgt_lon', 'tgt_lat']
+    layers = []
 
-    halo_layer = pdk.Layer(
+    if not path_df.empty:
+        layers.append(pdk.Layer(
+            'PathLayer', data=path_df,
+            get_path='path', get_color='color', get_width='width',
+            width_units='pixels', cap_rounded=True, joint_rounded=True,
+            pickable=False,
+        ))
+    layers.append(pdk.Layer(
         'LineLayer', data=seg_df,
-        get_source_position=pos_src, get_target_position=pos_tgt,
-        get_color='halo_color', get_width='halo_width',
-        width_units='pixels', pickable=False,
-    )
-    core_layer = pdk.Layer(
-        'LineLayer', data=seg_df,
-        get_source_position=pos_src, get_target_position=pos_tgt,
+        get_source_position=['src_lon', 'src_lat'],
+        get_target_position=['tgt_lon', 'tgt_lat'],
         get_color='color', get_width='width',
         width_units='pixels',
         pickable=True, auto_highlight=True,
         highlight_color=[255, 255, 255, 140],
-    )
-    layers = [halo_layer, core_layer]
-
+    ))
     if not arrow_df.empty:
         layers.append(pdk.Layer(
             'PolygonLayer', data=arrow_df,
@@ -421,7 +439,6 @@ def build_arc_layers(df, color_col='color', width_col='width'):
              total=('primaryValue', 'sum'))
         .reset_index()
     )
-    # Don't double-mark countries that are also exporters
     imp_df = imp_df[~imp_df['partnerDesc'].isin(set(exp_df['reporterDesc']))]
     imp_df['tooltip'] = imp_df.apply(
         lambda r: f"{r['partnerDesc']} (importer)\n{fmt(r['total'])} received", axis=1)
@@ -465,8 +482,54 @@ def build_arc_layers(df, color_col='color', width_col='width'):
     return layers
 
 
-def build_globe_deck(layers):
-    """Flat editorial-style flow map: pitch 0, dark basemap so the glow reads."""
+# ── Globe basemap ───────────────────────────────────────────────────────────
+# deck.gl's GlobeView doesn't support raster basemaps, so we draw our own:
+# a dark "ocean" polygon that wraps the whole sphere, plus Natural Earth
+# country polygons fetched client-side as GeoJSON.
+_NE_COUNTRIES_URL = (
+    "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
+    "master/geojson/ne_110m_admin_0_countries.geojson"
+)
+
+def _globe_base_layers():
+    return [
+        pdk.Layer(
+            'SolidPolygonLayer',
+            data=[{'polygon': [[-180, 90], [0, 90], [180, 90],
+                               [180, -90], [0, -90], [-180, -90]]}],
+            get_polygon='polygon',
+            get_fill_color=[13, 19, 33],          # deep navy ocean
+            stroked=False, pickable=False,
+        ),
+        pdk.Layer(
+            'GeoJsonLayer',
+            data=_NE_COUNTRIES_URL,
+            stroked=True, filled=True,
+            get_fill_color=[33, 42, 58],          # land
+            get_line_color=[78, 92, 115, 170],    # borders
+            line_width_min_pixels=0.6,
+            pickable=False,
+        ),
+    ]
+
+
+def build_globe_deck(layers, globe=True):
+    """
+    globe=True  → interactive 3-D globe (deck.gl _GlobeView). The sphere is
+                  continuous, so trans-Pacific flows never get cut off.
+    globe=False → flat dark Mercator map (CARTO basemap).
+    """
+    if globe:
+        return pdk.Deck(
+            layers=_globe_base_layers() + layers,
+            views=[pdk.View(type="_GlobeView", controller=True)],
+            initial_view_state=pdk.ViewState(
+                latitude=18, longitude=115, zoom=0.85,
+            ),
+            map_provider=None,
+            parameters={"cull": True},
+            tooltip={'text': '{tooltip}'},
+        )
     return pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(
@@ -475,8 +538,6 @@ def build_globe_deck(layers):
         map_style='https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json',
         tooltip={'text': '{tooltip}'},
     )
-
-
 
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
 
@@ -591,7 +652,15 @@ year = st.sidebar.slider("Year", 2018, 2025, 2024, label_visibility="collapsed")
 
 st.sidebar.markdown("### Map Detail")
 st.sidebar.caption("Number of flows shown on each map. Fewer = cleaner story; more = fuller picture.")
-max_flows = st.sidebar.slider("Top N flows", 10, 60, 30, step=5, label_visibility="collapsed")
+max_flows = st.sidebar.slider("Top N flows", 10, 60, 25, step=5, label_visibility="collapsed")
+
+projection = st.sidebar.radio(
+    "Projection",
+    ["🌐 3D Globe", "🗺️ Flat Map"],
+    index=0,
+    help="The globe is continuous, so trans-Pacific flows are never cut off. Drag to rotate.",
+)
+use_globe = projection.endswith("Globe")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
@@ -675,16 +744,16 @@ with tab1:
         # comparable when scrubbing the year slider (a $50B flow looks the same
         # in 2019 and 2025).
         global_max_ic = df_arcs['primaryValue'].max()
-        df_year['width'] = (np.sqrt(df_year['primaryValue'] / global_max_ic) * 9).clip(lower=1.4)
+        df_year['width'] = (np.sqrt(df_year['primaryValue'] / global_max_ic) * 6).clip(lower=1.0)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
-            build_globe_deck(build_arc_layers(df_year)),
-            key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}",
+            build_globe_deck(build_arc_layers(df_year, globe=use_globe), globe=use_globe),
+            key=f"arc_map_{year}_{projection}_{'_'.join(sorted(selected_countries))}",
         )
         st.caption(
             "**How to read this map** — Each ribbon is an export flow: it starts thin at the "
             "exporter and widens toward the arrowhead at the importer. Width ∝ √(trade value), "
-            "colour = exporting country. Hover any ribbon or dot for exact values."
+            "colour = exporting country. Drag to rotate the globe; hover any ribbon or dot for exact values."
         )
     else:
         st.info("Select at least one IC exporter in the sidebar to display the map.")
@@ -803,11 +872,11 @@ with tab1:
         df_eq_year = df_eq_year.nlargest(max_flows, 'primaryValue').copy()
         df_eq_year['color'] = df_eq_year['reporterDesc'].map(country_rgba)
         global_max_eq = df_arcs_eq['primaryValue'].max()
-        df_eq_year['width'] = (np.sqrt(df_eq_year['primaryValue'] / global_max_eq) * 9).clip(lower=1.4)
+        df_eq_year['width'] = (np.sqrt(df_eq_year['primaryValue'] / global_max_eq) * 6).clip(lower=1.0)
         df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
-            build_globe_deck(build_arc_layers(df_eq_year)),
-            key=f"arc_eq_{year}_{'_'.join(sorted(selected_equip_countries))}",
+            build_globe_deck(build_arc_layers(df_eq_year, globe=use_globe), globe=use_globe),
+            key=f"arc_eq_{year}_{projection}_{'_'.join(sorted(selected_equip_countries))}",
         )
         st.caption(
             "**How to read this map** — Ribbons start thin at the exporter and widen toward "
