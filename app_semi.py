@@ -246,6 +246,8 @@ country_coords = {
     'THA':(15.8700,100.9925),'IDN':(-0.7893,113.9213),'IRL':(53.1424,-7.6921),
     'BRA':(-14.235,-51.9253),'AUS':(-25.274,133.7751), 'CZE':(49.8175,15.4730),
     'ISR':(31.0461,34.8516), 'POL':(51.9194,19.1451), 'SAU':(23.8859,45.0792),
+    'CAN':(56.1304,-106.3468),'FRA':(46.2276,2.2137),  'BEL':(50.5039,4.4699),
+    'CRI':(9.7489,-83.7534),  'AUT':(47.5162,14.5501),
 }
 
 def fmt(val):
@@ -590,7 +592,7 @@ st.sidebar.markdown("### IC Re-exports Hubs")
 st.sidebar.caption(
     "Overlay IC re-export flows (HS 8542) from key intermediate hubs onto the IC map. "
     "These countries receive chips from primary exporters and forward them to final "
-    "assembly markets — revealing the second hop of the supply chain."
+    "assembly markets, revealing the second hop of the supply chain."
 )
 selected_hubs = []
 for hub in REEXPORT_HUBS:             # alphabetical: Hong Kong, Malaysia, Singapore, Vietnam
