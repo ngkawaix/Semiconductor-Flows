@@ -207,22 +207,73 @@ def hex_to_rgba(hex_color, alpha=0.45):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
+def _arc_height(row):
+    """
+    Compute a per-arc height that keeps long-distance arcs flat.
+
+    pydeck's get_height scales the arc's peak *relative to the chord length*,
+    so a flat value like 1.3 makes trans-Pacific arcs shoot off the screen.
+    Strategy: invert the relationship — longer arcs get a smaller height
+    multiplier so they all end up at a similar visual peak.
+
+    We use the Haversine great-circle distance (in km) as the normalising
+    factor, then map it through a gentle curve:
+
+        height = base_height / (1 + k * distance_km)
+
+    where:
+      base_height  — the peak height we'd want for a very short arc (~0.35)
+      k            — controls how quickly height falls off with distance.
+                     0.0008 means a 5,000 km arc gets ~0.2, a
+                     10,000 km arc gets ~0.13, keeping everything flat.
+    """
+    import math
+    lat1, lon1 = math.radians(row['source_lat']), math.radians(row['source_lon'])
+    lat2, lon2 = math.radians(row['target_lat']), math.radians(row['target_lon'])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    # Haversine formula — gives the shortest great-circle distance
+    a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+    dist_km = 6371 * 2 * math.asin(math.sqrt(a))
+
+    base_height = 0.35   # max height for a short arc
+    k           = 0.0008 # fall-off rate; tune this to taste
+    return base_height / (1 + k * dist_km)
+
+
 def build_arc_layers(df, color_col='color', width_col='width'):
-    """Two-layer glow effect: transparent wide halo + bright narrow core."""
+    """
+    Two-layer glow effect with distance-aware flat arcs and
+    source → destination colour gradient.
+
+    Each arc fades from the exporter's brand colour at the source end
+    to a bright neutral white-cyan [200, 240, 255] at the destination,
+    mimicking the look of the LinkedIn reference (warm/cool colour transition).
+    The glow layer uses the same source colour at very low alpha so the
+    halo pulses outward from the origin country.
+    """
     df = df.copy()
-    df['_glow_color'] = df[color_col].apply(
-        lambda c: [c[0], c[1], c[2], 30]   # same RGB, very low alpha for halo
-    )
-    df['_glow_width'] = df[width_col] * 5   # halo is 5× the core width
+
+    # Per-arc height — flat for long distances, slightly taller for short ones
+    df['_height'] = df.apply(_arc_height, axis=1)
+
+    # Destination colour: bright neutral that works across all source palettes
+    # [200, 240, 255, 180] — a cool ice-white that fades in on arrival
+    df['_dest_color'] = df[color_col].apply(lambda _: [200, 240, 255, 180])
+
+    # Glow: same source hue, very low alpha
+    df['_glow_src']  = df[color_col].apply(lambda c: [c[0], c[1], c[2], 25])
+    df['_glow_dest'] = df[color_col].apply(lambda _: [200, 240, 255, 10])
+    df['_glow_width'] = df[width_col] * 4
 
     glow_layer = pdk.Layer(
         'ArcLayer', data=df,
         get_source_position=['source_lon', 'source_lat'],
         get_target_position=['target_lon', 'target_lat'],
-        get_source_color='_glow_color',
-        get_target_color='_glow_color',
+        get_source_color='_glow_src',
+        get_target_color='_glow_dest',
         get_width='_glow_width',
-        get_height=0.2,
+        get_height='_height',
         great_circle=True,
         pickable=False,
     )
@@ -230,10 +281,10 @@ def build_arc_layers(df, color_col='color', width_col='width'):
         'ArcLayer', data=df,
         get_source_position=['source_lon', 'source_lat'],
         get_target_position=['target_lon', 'target_lat'],
-        get_source_color=color_col,
-        get_target_color=color_col,
+        get_source_color=color_col,      # exporter brand colour at origin
+        get_target_color='_dest_color',  # cool neutral at destination
         get_width=width_col,
-        get_height=0.2,
+        get_height='_height',
         great_circle=True,
         pickable=True,
         auto_highlight=True,
