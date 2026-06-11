@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import comtradeapicall as comtrade
 import pandas as pd
 import pydeck as pdk
@@ -539,6 +540,23 @@ def build_globe_deck(layers, globe=True):
         tooltip={'text': '{tooltip}'},
     )
 
+
+def render_flow_map(deck, key, globe=True, height=620):
+    """
+    Render a pydeck Deck in Streamlit.
+
+    IMPORTANT: st.pydeck_chart hardcodes a flat MapView and silently ignores
+    custom `views` (including _GlobeView) and `map_provider=None`. To get a
+    real 3-D globe we therefore render pydeck's standalone HTML export —
+    which fully supports GlobeView — inside an HTML component. Flat mode
+    still uses the native st.pydeck_chart widget.
+    """
+    if globe:
+        components.html(deck.to_html(as_string=True, notebook_display=False),
+                        height=height)
+    else:
+        st.pydeck_chart(deck, key=key)
+
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
 
 def build_sankey_fig(df_flow, hex_palette):
@@ -746,9 +764,10 @@ with tab1:
         global_max_ic = df_arcs['primaryValue'].max()
         df_year['width'] = (np.sqrt(df_year['primaryValue'] / global_max_ic) * 6).clip(lower=1.0)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
-        st.pydeck_chart(
+        render_flow_map(
             build_globe_deck(build_arc_layers(df_year, globe=use_globe), globe=use_globe),
             key=f"arc_map_{year}_{projection}_{'_'.join(sorted(selected_countries))}",
+            globe=use_globe,
         )
         st.caption(
             "**How to read this map** — Each ribbon is an export flow: it starts thin at the "
@@ -874,9 +893,10 @@ with tab1:
         global_max_eq = df_arcs_eq['primaryValue'].max()
         df_eq_year['width'] = (np.sqrt(df_eq_year['primaryValue'] / global_max_eq) * 6).clip(lower=1.0)
         df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
-        st.pydeck_chart(
+        render_flow_map(
             build_globe_deck(build_arc_layers(df_eq_year, globe=use_globe), globe=use_globe),
             key=f"arc_eq_{year}_{projection}_{'_'.join(sorted(selected_equip_countries))}",
+            globe=use_globe,
         )
         st.caption(
             "**How to read this map** — Ribbons start thin at the exporter and widen toward "
