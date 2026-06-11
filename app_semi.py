@@ -606,7 +606,7 @@ st.sidebar.caption("Applies to the Equipment section of Tab 1.")
 selected_equip_countries = []
 for country in EQUIP_EXPORTERS:       # alphabetical: Germany, Japan, Netherlands, Korea, USA
     hex_c = equip_src_hex[country]
-    if st.sidebar.checkbox(country, value=True, key=f"eq_toggle_{country}"):
+    if st.sidebar.checkbox(country, value=(country == 'Netherlands'), key=f"eq_toggle_{country}"):
         selected_equip_countries.append(country)
 
 st.sidebar.markdown("---")
