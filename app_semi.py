@@ -281,28 +281,60 @@ def _interpolate_arcs(df, color_col='color', width_col='width'):
     Expand each row of df into a list of segment dicts ready for
     pydeck's LineLayer.
 
-    Each segment dict has:
-      src_lon, src_lat, src_alt  — start of segment
-      tgt_lon, tgt_lat, tgt_alt  — end of segment
-      color                       — RGBA list (colour-graduated along arc)
-      glow_color                  — same hue, very low alpha, for halo layer
-      width                       — stroke width
-      tooltip                     — hover text (carried from the source row)
+    Lateral fan offset
+    ------------------
+    Many arcs converge on the same destination (e.g. every exporter ships
+    to China/Taiwan).  Without adjustment they all land at exactly the same
+    pixel, creating an unreadable pile.
 
-    Colour graduation: the arc transitions from the exporter's brand colour
-    at t=0 to a cool ice-white [200, 240, 255] at t=1, matching the look of
-    the LinkedIn reference.  We lerp the RGBA values across each segment.
+    We assign each arc a small perpendicular nudge at the midpoint so the
+    bundle fans out.  The nudge is calculated per (partnerISO) group:
+      • Sort arcs in the group by trade value (largest first — it anchors
+        the centre of the fan)
+      • Assign rank r in [-(n-1)/2 … +(n-1)/2]
+      • At the arc midpoint we shift the great-circle path laterally by
+        r × FAN_DEG degrees (≈ 0.45° per step, ~50 km at the equator)
+      • The shift is applied perpendicular to the arc direction so arcs
+        spread sideways rather than up/down
+
+    This mimics how tools like Kepler.gl draw "brushed" flow maps.
     """
-    DEST_COLOR = np.array([200, 240, 255, 200], dtype=float)
-    segs = []
-    n_pts = 80   # number of interpolation steps per arc
+    DEST_COLOR  = np.array([200, 240, 255, 200], dtype=float)
+    FAN_DEG     = 0.45   # lateral spread between neighbouring arcs (degrees)
+    n_pts       = 80
 
-    for _, row in df.iterrows():
+    # Build per-destination rank for lateral fanning
+    # Within each destination group, sort by value desc so the thickest arc
+    # sits in the middle of the fan
+    fan_offset = {}   # (reporterISO, partnerISO) → float offset in degrees
+    for partner_iso, grp in df.groupby('partnerISO'):
+        grp_sorted = grp.sort_values(width_col, ascending=False)
+        n = len(grp_sorted)
+        for rank, idx in enumerate(grp_sorted.index):
+            # centre the fan: rank 0 → offset 0, rank 1 → +FAN, rank 2 → -FAN …
+            centre = (n - 1) / 2.0
+            signed = (rank - centre) * FAN_DEG
+            fan_offset[idx] = signed
+
+    segs = []
+
+    for idx, row in df.iterrows():
         pts = _great_circle_points(
             row['source_lat'], row['source_lon'],
             row['target_lat'], row['target_lon'],
             n=n_pts,
         )
+
+        # Perpendicular direction at the arc midpoint — used to apply lateral shift
+        # We compute the bearing at t=0.5 and rotate 90° to get the normal
+        mid   = n_pts // 2
+        lo_a, la_a, _ = pts[mid - 1]
+        lo_b, la_b, _ = pts[mid + 1]
+        bearing = math.atan2(lo_b - lo_a, la_b - la_a)  # rough 2-D bearing
+        perp_lat = math.cos(bearing + math.pi / 2)
+        perp_lon = math.sin(bearing + math.pi / 2)
+
+        offset  = fan_offset.get(idx, 0.0)
         src_rgba = np.array(row[color_col], dtype=float)
         width    = float(row[width_col])
         tooltip  = row.get('value_fmt', '')
@@ -317,7 +349,16 @@ def _interpolate_arcs(df, color_col='color', width_col='width'):
             if abs(lon_b - lon_a) > 180:
                 continue
 
-            t_mid = (i + 0.5) / n_pts          # fractional position 0→1
+            # Apply lateral fan offset — taper it in near source and destination
+            # so all arcs still originate and terminate at the real city point
+            t_mid   = (i + 0.5) / n_pts
+            taper   = math.sin(math.pi * t_mid)   # 0 at ends, 1 at midpoint
+            nudge   = offset * taper
+            lon_a  += nudge * perp_lon
+            lat_a  += nudge * perp_lat
+            lon_b  += nudge * perp_lon
+            lat_b  += nudge * perp_lat
+
             rgba  = (src_rgba * (1 - t_mid) + DEST_COLOR * t_mid).astype(int).tolist()
             glow  = [rgba[0], rgba[1], rgba[2], 18]
 
@@ -327,7 +368,7 @@ def _interpolate_arcs(df, color_col='color', width_col='width'):
                 'color':       rgba,
                 'glow_color':  glow,
                 'width':       width,
-                'glow_width':  width * 3.5,
+                'glow_width':  width * 3,
                 'tooltip':     f'{reporter} → {partner}\n{tooltip}',
             })
     return pd.DataFrame(segs)
@@ -572,7 +613,10 @@ with tab1:
 
     if selected_countries and not df_year.empty:
         df_year['color']     = df_year['reporterDesc'].map(country_rgba)
-        df_year['width']     = (df_year['primaryValue'] / df_year['primaryValue'].max() * 25).clip(lower=2)
+        # Square-root scaling keeps large flows readable without drowning small ones.
+        # Max 8 px — wide enough to see gradation, narrow enough that parallel arcs
+        # don't collide at dense convergence points like Taiwan/Korea.
+        df_year['width'] = (np.sqrt(df_year['primaryValue'] / df_year['primaryValue'].max()) * 8).clip(lower=1.2)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
             build_globe_deck(
@@ -697,7 +741,7 @@ with tab1:
 
     if selected_equip_countries and not df_eq_year.empty:
         df_eq_year['color']     = df_eq_year['reporterDesc'].map(country_rgba)
-        df_eq_year['width']     = (df_eq_year['primaryValue'] / df_eq_year['primaryValue'].max() * 25).clip(lower=2)
+        df_eq_year['width'] = (np.sqrt(df_eq_year['primaryValue'] / df_eq_year['primaryValue'].max()) * 8).clip(lower=1.2)
         df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
             build_globe_deck(
