@@ -144,7 +144,7 @@ DISCLOSED_REVENUE = {
     # Chip Designers — FY2025/26 (terminal nodes; label = actual company revenue)
     "Nvidia":           215.9,   # FY2026 (Jan 2026 YE)
     "AMD":               34.6,   # FY2025 (Dec 2025 YE)
-    "Broadcom":          63.9,   # FY2025 (Nov 2025 YE)
+    "Broadcom":          38.9,   # FY2025 semiconductor solutions only (excl. VMware/Infra Software; total $63.9B)
     "Qualcomm":          44.3,   # FY2025 (Sep 2025 YE)
     "MediaTek":          18.6,   # FY2025 (Dec 2025 YE)
     "Intel Chips":       43.1,   # FY2025 CCG $30.3B + DCAI $12.8B
@@ -209,211 +209,273 @@ def hex_to_rgba(hex_color, alpha=0.45):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
-# ── Great-circle arc rendering ────────────────────────────────────────────
-# Strategy: instead of relying on pydeck's ArcLayer (which breaks at the
-# antimeridian — the 180° longitude line), we manually interpolate each arc
-# as N short LineLayer segments that follow the true spherical great-circle
-# path.  When a segment would cross the antimeridian we detect the jump and
-# skip it, so every arc is continuous with no mid-ocean restarts.
+# ── Flow-map rendering — flat curved ribbons with glow + arrowheads ────────
+# Design goals (replacing the old 3-D great-circle arcs):
+#   • FLAT on the map (pitch 0, no altitude) — reads like an editorial graphic
+#   • Quadratic Bezier curves bowed sideways, so flows sweep across the map
+#     instead of ballooning into the sky
+#   • TAPERED width: thin at the exporter, wide at the importer — the taper
+#     itself communicates direction even before you see the arrowhead
+#   • Arrowhead triangles at every destination
+#   • Two-pass draw: a wide, low-alpha halo underneath + a bright core on
+#     top = the "glow" without sacrificing readability
+#   • Country dots + labels so the viewer always knows what they're seeing
 #
-# The arc is given a gentle "lift" above the surface using altitude:
-# each point's altitude is set to  A * sin(π * t)  where t goes 0→1 along
-# the arc.  This gives a smooth bell-curve elevation that looks like a
-# globe-hugging flight path.  A is proportional to the arc's geographic
-# length so short arcs stay low and long arcs rise just enough to read well.
+# Antimeridian: curves are computed in "unwrapped" longitude space (target
+# longitude shifted by ±360° to the nearest representation), then every point
+# is wrapped back to [-180, 180]. Any segment whose wrapped endpoints jump
+# more than 180° is skipped, so trans-Pacific flows render cleanly on both
+# edges of the map with no stray horizontal lines.
 
-_R_EARTH = 6_371_000   # metres — used for altitude scaling
+def _wrap_lon(lon):
+    return ((lon + 180.0) % 360.0) - 180.0
 
-def _great_circle_points(lat1, lon1, lat2, lon2, n=80):
+
+def _flow_path(lat1, lon1, lat2, lon2, bow_deg, n=60):
     """
-    Return n+1 (lon, lat, alt) tuples that follow the great-circle path
-    from (lat1,lon1) to (lat2,lon2) with a sinusoidal altitude lift.
+    Quadratic Bezier from (lat1,lon1) to (lat2,lon2), bowed sideways by
+    bow_deg degrees, returned as a list of (wrapped_lon, lat, t) tuples.
 
-    The maths:
-      We work in 3-D Cartesian space on the unit sphere.
-      p1, p2  — unit vectors for the two endpoints (converted from lat/lon).
-      For each step t in [0,1] we interpolate using Slerp (spherical linear
-      interpolation):
-          p(t) = sin((1-t)*Ω)/sin(Ω) * p1  +  sin(t*Ω)/sin(Ω) * p2
-      where Ω is the angle between p1 and p2 (= great-circle distance in rad).
-      We then convert back to lat/lon and add altitude = peak * sin(π*t).
-
-    Antimeridian handling:
-      The caller checks consecutive (lon_a, lon_b) pairs and skips any
-      segment where |lon_b − lon_a| > 180°.  That single condition catches
-      every wrap-around without any special-casing.
+    Bezier formula (t goes 0 → 1 along the curve):
+        P(t) = (1-t)^2 * P0  +  2(1-t)t * C  +  t^2 * P1
+    where P0 = source, P1 = target, and C = control point = the midpoint
+    pushed perpendicular to the straight line by bow_deg. Positive bow bows
+    the curve to the LEFT of the direction of travel, so all flows share a
+    consistent, organised sweep.
     """
-    la1, lo1 = math.radians(lat1), math.radians(lon1)
-    la2, lo2 = math.radians(lat2), math.radians(lon2)
+    # Unwrap target longitude to the closest equivalent (antimeridian fix)
+    if lon2 - lon1 > 180:
+        lon2 -= 360
+    elif lon2 - lon1 < -180:
+        lon2 += 360
 
-    # Unit vectors on the sphere
-    p1 = np.array([math.cos(la1)*math.cos(lo1),
-                   math.cos(la1)*math.sin(lo1),
-                   math.sin(la1)])
-    p2 = np.array([math.cos(la2)*math.cos(lo2),
-                   math.cos(la2)*math.sin(lo2),
-                   math.sin(la2)])
+    dx, dy = lon2 - lon1, lat2 - lat1
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        return []
 
-    # Great-circle angle between the two points (radians)
-    omega = math.acos(max(-1.0, min(1.0, float(np.dot(p1, p2)))))
-
-    # Peak altitude: 600 km for a trans-Pacific arc, ~80 km for a short hop
-    # Formula: peak_m = 0.055 * R_earth * omega  (omega in radians, ~0→π)
-    peak_m = 0.055 * _R_EARTH * omega
+    # Perpendicular unit vector (rotate direction +90°)
+    px, py = -dy / dist, dx / dist
+    cx = (lon1 + lon2) / 2 + px * bow_deg
+    cy = (lat1 + lat2) / 2 + py * bow_deg
 
     pts = []
     for i in range(n + 1):
         t = i / n
-        if omega < 1e-6:          # source == destination, degenerate arc
-            pt = p1
-        else:
-            pt = (math.sin((1-t)*omega)/math.sin(omega)) * p1                + (math.sin(   t *omega)/math.sin(omega)) * p2
-        # Back to lat/lon
-        pt_lat = math.degrees(math.asin(max(-1.0, min(1.0, float(pt[2])))))
-        pt_lon = math.degrees(math.atan2(float(pt[1]), float(pt[0])))
-        alt    = peak_m * math.sin(math.pi * t)
-        pts.append((pt_lon, pt_lat, alt))
+        lon = (1 - t) ** 2 * lon1 + 2 * (1 - t) * t * cx + t ** 2 * lon2
+        lat = (1 - t) ** 2 * lat1 + 2 * (1 - t) * t * cy + t ** 2 * lat2
+        pts.append((_wrap_lon(lon), lat, t))
     return pts
 
 
-def _interpolate_arcs(df, color_col='color', width_col='width'):
+def _mix_with_white(rgb, frac):
+    """Lighten an [r,g,b] colour by mixing `frac` of white into it."""
+    return [int(c + (255 - c) * frac) for c in rgb[:3]]
+
+
+def _build_flow_geometry(df, color_col='color', width_col='width'):
     """
-    Expand each row of df into a list of segment dicts ready for
-    pydeck's LineLayer.
+    Expand each flow row into:
+      seg_df   — short line segments with per-segment width (taper) and
+                 colour (slight lightening toward the head)
+      arrow_df — one triangle polygon per flow, placed at the destination
+      Plus hub/label dataframes for exporters and importers.
 
-    Lateral fan offset
-    ------------------
-    Many arcs converge on the same destination (e.g. every exporter ships
-    to China/Taiwan).  Without adjustment they all land at exactly the same
-    pixel, creating an unreadable pile.
-
-    We assign each arc a small perpendicular nudge at the midpoint so the
-    bundle fans out.  The nudge is calculated per (partnerISO) group:
-      • Sort arcs in the group by trade value (largest first — it anchors
-        the centre of the fan)
-      • Assign rank r in [-(n-1)/2 … +(n-1)/2]
-      • At the arc midpoint we shift the great-circle path laterally by
-        r × FAN_DEG degrees (≈ 0.45° per step, ~50 km at the equator)
-      • The shift is applied perpendicular to the arc direction so arcs
-        spread sideways rather than up/down
-
-    This mimics how tools like Kepler.gl draw "brushed" flow maps.
+    Curvature separation: flows converging on the same destination are
+    ranked by value; each rank gets a slightly different bow magnitude so
+    the ribbons fan apart mid-flight instead of stacking into one rope,
+    while still arriving at the same point from distinct angles.
     """
-    DEST_COLOR  = np.array([200, 240, 255, 255], dtype=float)
-    FAN_DEG     = 0.45   # lateral spread between neighbouring arcs (degrees)
-    n_pts       = 80
+    N_PTS = 60
 
-    # Build per-destination rank for lateral fanning
-    # Within each destination group, sort by value desc so the thickest arc
-    # sits in the middle of the fan
-    fan_offset = {}   # (reporterISO, partnerISO) → float offset in degrees
-    for partner_iso, grp in df.groupby('partnerISO'):
+    # Per-destination rank → bow multiplier
+    bow_mult = {}
+    for _, grp in df.groupby('partnerISO'):
         grp_sorted = grp.sort_values(width_col, ascending=False)
-        n = len(grp_sorted)
         for rank, idx in enumerate(grp_sorted.index):
-            # centre the fan: rank 0 → offset 0, rank 1 → +FAN, rank 2 → -FAN …
-            centre = (n - 1) / 2.0
-            signed = (rank - centre) * FAN_DEG
-            fan_offset[idx] = signed
+            # 1.0, 1.35, 0.65, 1.7, 0.30 … alternate around the base bow
+            step = (rank + 1) // 2 * 0.35
+            bow_mult[idx] = 1.0 + step if rank % 2 == 1 else 1.0 - step
 
-    segs = []
+    segs, arrows = [], []
 
     for idx, row in df.iterrows():
-        pts = _great_circle_points(
-            row['source_lat'], row['source_lon'],
-            row['target_lat'], row['target_lon'],
-            n=n_pts,
-        )
+        # Base bow grows with distance, capped so short hops stay subtle
+        dlon = row['target_lon'] - row['source_lon']
+        if dlon > 180:   dlon -= 360
+        elif dlon < -180: dlon += 360
+        dist = math.hypot(dlon, row['target_lat'] - row['source_lat'])
+        bow  = max(1.5, min(dist * 0.16, 16.0)) * bow_mult.get(idx, 1.0)
 
-        # Perpendicular direction at the arc midpoint — used to apply lateral shift
-        # We compute the bearing at t=0.5 and rotate 90° to get the normal
-        mid   = n_pts // 2
-        lo_a, la_a, _ = pts[mid - 1]
-        lo_b, la_b, _ = pts[mid + 1]
-        bearing = math.atan2(lo_b - lo_a, la_b - la_a)  # rough 2-D bearing
-        perp_lat = math.cos(bearing + math.pi / 2)
-        perp_lon = math.sin(bearing + math.pi / 2)
+        pts = _flow_path(row['source_lat'], row['source_lon'],
+                         row['target_lat'], row['target_lon'],
+                         bow_deg=bow, n=N_PTS)
+        if not pts:
+            continue
 
-        offset  = fan_offset.get(idx, 0.0)
-        src_rgba = np.array(row[color_col], dtype=float)
+        src_rgb  = list(row[color_col])[:3]
         width    = float(row[width_col])
-        tooltip  = row.get('value_fmt', '')
-        reporter = row.get('reporterDesc', '')
-        partner  = row.get('partnerDesc', '')
+        tooltip  = f"{row.get('reporterDesc','')} → {row.get('partnerDesc','')}\n{row.get('value_fmt','')}"
 
         for i in range(len(pts) - 1):
-            lon_a, lat_a, alt_a = pts[i]
-            lon_b, lat_b, alt_b = pts[i + 1]
-
-            # Skip segments that cross the antimeridian (|Δlon| > 180°)
-            if abs(lon_b - lon_a) > 180:
+            lon_a, lat_a, t_a = pts[i]
+            lon_b, lat_b, t_b = pts[i + 1]
+            if abs(lon_b - lon_a) > 180:        # antimeridian jump → skip
                 continue
-
-            # Apply lateral fan offset — taper it in near source and destination
-            # so all arcs still originate and terminate at the real city point
-            t_mid   = (i + 0.5) / n_pts
-            taper   = math.sin(math.pi * t_mid)   # 0 at ends, 1 at midpoint
-            nudge   = offset * taper
-            lon_a  += nudge * perp_lon
-            lat_a  += nudge * perp_lat
-            lon_b  += nudge * perp_lon
-            lat_b  += nudge * perp_lat
-
-            rgba = (src_rgba * (1 - t_mid) + DEST_COLOR * t_mid).astype(int).tolist()
-            rgba[3] = 255  # fully opaque — no semi-transparent overlap haze
-
+            t_mid = (t_a + t_b) / 2
+            rgb   = _mix_with_white(src_rgb, 0.30 * t_mid)
             segs.append({
-                'src_lon': lon_a, 'src_lat': lat_a, 'src_alt': alt_a,
-                'tgt_lon': lon_b, 'tgt_lat': lat_b, 'tgt_alt': alt_b,
-                'color':   rgba,
-                'width':   width,
-                'tooltip': f'{reporter} → {partner}\n{tooltip}',
+                'src_lon': lon_a, 'src_lat': lat_a,
+                'tgt_lon': lon_b, 'tgt_lat': lat_b,
+                'color':      rgb + [235],
+                'halo_color': rgb + [45],
+                # Taper: 30% width at the tail → 100% at the head
+                'width':      width * (0.30 + 0.70 * t_mid),
+                'halo_width': width * (0.30 + 0.70 * t_mid) * 3.0,
+                'tooltip':    tooltip,
             })
-    return pd.DataFrame(segs)
+
+        # ── Arrowhead at the destination ──────────────────────────────────
+        # Walk back from the end to find the last contiguous (no-jump) pair
+        tip_i = len(pts) - 1
+        while tip_i > 0 and abs(pts[tip_i][0] - pts[tip_i - 1][0]) > 180:
+            tip_i -= 1
+        if tip_i == 0:
+            continue
+        lon_t, lat_t, _ = pts[tip_i]
+        lon_p, lat_p, _ = pts[tip_i - 1]
+        ddx, ddy = lon_t - lon_p, lat_t - lat_p
+        d = math.hypot(ddx, ddy)
+        if d < 1e-9:
+            continue
+        ux, uy = ddx / d, ddy / d            # unit direction of travel
+        nx, ny = -uy, ux                     # unit normal
+        # Arrow size scales gently with ribbon width (degrees at zoom ~2)
+        a_len  = 1.1 + width * 0.28
+        a_half = a_len * 0.42
+        tip   = [lon_t + ux * a_len * 0.55, lat_t + uy * a_len * 0.55]
+        baseL = [lon_t - ux * a_len * 0.45 + nx * a_half,
+                 lat_t - uy * a_len * 0.45 + ny * a_half]
+        baseR = [lon_t - ux * a_len * 0.45 - nx * a_half,
+                 lat_t - uy * a_len * 0.45 - ny * a_half]
+        arrows.append({
+            'polygon': [tip, baseL, baseR],
+            'color':   _mix_with_white(src_rgb, 0.30) + [255],
+            'tooltip': tooltip,
+        })
+
+    return pd.DataFrame(segs), pd.DataFrame(arrows)
 
 
 def build_arc_layers(df, color_col='color', width_col='width'):
     """
-    Build two pydeck LineLayer objects (glow halo + bright core) from the
-    great-circle-interpolated segment dataframe.
-
-    Using LineLayer instead of ArcLayer means:
-      • We control the path ourselves — no pydeck projection artefacts
-      • Antimeridian crossings are handled by skipping bad segments
-      • Altitude is explicit per-point, giving the globe-hugging lift
+    Build the full layer stack for one flow map:
+      halo ribbons → core ribbons → arrowheads → country dots → labels
+    Returned in draw order (first = bottom).
     """
-    seg_df = _interpolate_arcs(df, color_col=color_col, width_col=width_col)
+    seg_df, arrow_df = _build_flow_geometry(df, color_col, width_col)
     if seg_df.empty:
         return []
 
-    pos_src = ['src_lon', 'src_lat', 'src_alt']
-    pos_tgt = ['tgt_lon', 'tgt_lat', 'tgt_alt']
+    pos_src = ['src_lon', 'src_lat']
+    pos_tgt = ['tgt_lon', 'tgt_lat']
 
+    halo_layer = pdk.Layer(
+        'LineLayer', data=seg_df,
+        get_source_position=pos_src, get_target_position=pos_tgt,
+        get_color='halo_color', get_width='halo_width',
+        width_units='pixels', pickable=False,
+    )
     core_layer = pdk.Layer(
         'LineLayer', data=seg_df,
-        get_source_position=pos_src,
-        get_target_position=pos_tgt,
-        get_color='color',
-        get_width='width',
-        pickable=True,
-        auto_highlight=True,
-        highlight_color=[255, 255, 255, 120],
+        get_source_position=pos_src, get_target_position=pos_tgt,
+        get_color='color', get_width='width',
         width_units='pixels',
-        get_tooltip='tooltip',
+        pickable=True, auto_highlight=True,
+        highlight_color=[255, 255, 255, 140],
     )
-    return [core_layer]
+    layers = [halo_layer, core_layer]
+
+    if not arrow_df.empty:
+        layers.append(pdk.Layer(
+            'PolygonLayer', data=arrow_df,
+            get_polygon='polygon', get_fill_color='color',
+            stroked=False, pickable=True,
+        ))
+
+    # ── Country anchors: exporter dots (big, coloured) + importer dots ────
+    exp_df = (
+        df.groupby('reporterDesc')
+        .agg(lon=('source_lon', 'first'), lat=('source_lat', 'first'),
+             color=(color_col, 'first'),
+             total=('primaryValue', 'sum'))
+        .reset_index()
+    )
+    exp_df['fill']    = exp_df['color'].apply(lambda c: list(c)[:3] + [255])
+    exp_df['tooltip'] = exp_df.apply(
+        lambda r: f"{r['reporterDesc']} (exporter)\n{fmt(r['total'])} total", axis=1)
+
+    imp_df = (
+        df.groupby('partnerDesc')
+        .agg(lon=('target_lon', 'first'), lat=('target_lat', 'first'),
+             total=('primaryValue', 'sum'))
+        .reset_index()
+    )
+    # Don't double-mark countries that are also exporters
+    imp_df = imp_df[~imp_df['partnerDesc'].isin(set(exp_df['reporterDesc']))]
+    imp_df['tooltip'] = imp_df.apply(
+        lambda r: f"{r['partnerDesc']} (importer)\n{fmt(r['total'])} received", axis=1)
+
+    layers.append(pdk.Layer(
+        'ScatterplotLayer', data=imp_df,
+        get_position=['lon', 'lat'],
+        get_fill_color=[226, 232, 240, 220],
+        get_line_color=[15, 23, 42, 255],
+        get_radius=55000, radius_min_pixels=3, radius_max_pixels=6,
+        stroked=True, line_width_min_pixels=1, pickable=True,
+    ))
+    layers.append(pdk.Layer(
+        'ScatterplotLayer', data=exp_df,
+        get_position=['lon', 'lat'],
+        get_fill_color='fill',
+        get_line_color=[255, 255, 255, 230],
+        get_radius=90000, radius_min_pixels=5, radius_max_pixels=9,
+        stroked=True, line_width_min_pixels=1.5, pickable=True,
+    ))
+
+    # ── Labels ─────────────────────────────────────────────────────────────
+    exp_df['label'] = exp_df['reporterDesc']
+    imp_df['label'] = imp_df['partnerDesc']
+    layers.append(pdk.Layer(
+        'TextLayer', data=imp_df,
+        get_position=['lon', 'lat'], get_text='label',
+        get_color=[203, 213, 225, 235], get_size=11,
+        get_pixel_offset=[0, -14],
+        font_family='Arial', font_weight=600,
+        pickable=False,
+    ))
+    layers.append(pdk.Layer(
+        'TextLayer', data=exp_df,
+        get_position=['lon', 'lat'], get_text='label',
+        get_color=[255, 255, 255, 255], get_size=14,
+        get_pixel_offset=[0, -16],
+        font_family='Arial', font_weight=700,
+        pickable=False,
+    ))
+    return layers
 
 
-def build_globe_deck(layers, key, tooltip_text):
-    """Standard flat-map deck, now antimeridian-safe thanks to manual segments."""
+def build_globe_deck(layers):
+    """Flat editorial-style flow map: pitch 0, dark basemap so the glow reads."""
     return pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(
-            latitude=20, longitude=105, zoom=2, pitch=30,
+            latitude=22, longitude=95, zoom=1.7, pitch=0, bearing=0,
         ),
-        map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+        map_style='https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json',
         tooltip={'text': '{tooltip}'},
     )
+
 
 
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
@@ -527,6 +589,10 @@ st.sidebar.markdown("### Select Year")
 st.sidebar.caption("Applies to the Global Supply Chain tab.")
 year = st.sidebar.slider("Year", 2018, 2025, 2024, label_visibility="collapsed")
 
+st.sidebar.markdown("### Map Detail")
+st.sidebar.caption("Number of flows shown on each map. Fewer = cleaner story; more = fuller picture.")
+max_flows = st.sidebar.slider("Top N flows", 10, 60, 30, step=5, label_visibility="collapsed")
+
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     "**Source:** UN Comtrade  \n"
@@ -601,19 +667,24 @@ with tab1:
     st.markdown("---")
 
     if selected_countries and not df_year.empty:
-        df_year['color']     = df_year['reporterDesc'].map(country_rgba)
-        # Square-root scaling keeps large flows readable without drowning small ones.
-        # Max 8 px — wide enough to see gradation, narrow enough that parallel arcs
-        # don't collide at dense convergence points like Taiwan/Korea.
-        df_year['width'] = (np.sqrt(df_year['primaryValue'] / df_year['primaryValue'].max()) * 8).clip(lower=1.2)
+        # Keep only the top N flows so the map stays readable
+        df_year = df_year.nlargest(max_flows, 'primaryValue').copy()
+        df_year['color'] = df_year['reporterDesc'].map(country_rgba)
+        # Square-root scaling keeps large flows readable without drowning small
+        # ones. Normalised against the ALL-YEARS maximum so ribbon widths are
+        # comparable when scrubbing the year slider (a $50B flow looks the same
+        # in 2019 and 2025).
+        global_max_ic = df_arcs['primaryValue'].max()
+        df_year['width'] = (np.sqrt(df_year['primaryValue'] / global_max_ic) * 9).clip(lower=1.4)
         df_year['value_fmt'] = df_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
-            build_globe_deck(
-                layers=build_arc_layers(df_year),
-                key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}",
-                tooltip_text='{reporterDesc} → {partnerDesc}\n{value_fmt}',
-            ),
-            key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}"
+            build_globe_deck(build_arc_layers(df_year)),
+            key=f"arc_map_{year}_{'_'.join(sorted(selected_countries))}",
+        )
+        st.caption(
+            "**How to read this map** — Each ribbon is an export flow: it starts thin at the "
+            "exporter and widens toward the arrowhead at the importer. Width ∝ √(trade value), "
+            "colour = exporting country. Hover any ribbon or dot for exact values."
         )
     else:
         st.info("Select at least one IC exporter in the sidebar to display the map.")
@@ -729,16 +800,18 @@ with tab1:
     st.markdown("---")
 
     if selected_equip_countries and not df_eq_year.empty:
-        df_eq_year['color']     = df_eq_year['reporterDesc'].map(country_rgba)
-        df_eq_year['width'] = (np.sqrt(df_eq_year['primaryValue'] / df_eq_year['primaryValue'].max()) * 8).clip(lower=1.2)
+        df_eq_year = df_eq_year.nlargest(max_flows, 'primaryValue').copy()
+        df_eq_year['color'] = df_eq_year['reporterDesc'].map(country_rgba)
+        global_max_eq = df_arcs_eq['primaryValue'].max()
+        df_eq_year['width'] = (np.sqrt(df_eq_year['primaryValue'] / global_max_eq) * 9).clip(lower=1.4)
         df_eq_year['value_fmt'] = df_eq_year['primaryValue'].apply(fmt)
         st.pydeck_chart(
-            build_globe_deck(
-                layers=build_arc_layers(df_eq_year),
-                key=f"arc_eq_{year}_{'_'.join(sorted(selected_equip_countries))}",
-                tooltip_text='{reporterDesc} → {partnerDesc}\n{value_fmt}',
-            ),
-            key=f"arc_eq_{year}_{'_'.join(sorted(selected_equip_countries))}"
+            build_globe_deck(build_arc_layers(df_eq_year)),
+            key=f"arc_eq_{year}_{'_'.join(sorted(selected_equip_countries))}",
+        )
+        st.caption(
+            "**How to read this map** — Ribbons start thin at the exporter and widen toward "
+            "the arrowhead at the importer. Width ∝ √(trade value), colour = exporting country."
         )
     else:
         st.info("Select at least one equipment exporter in the sidebar to display the map.")
@@ -932,10 +1005,6 @@ with tab2:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.title("Company-Level Supply Chain Atlas")
-    st.caption(
-        "Revenue flows between named companies across five layers of the semiconductor supply chain. "
-        "FY2024/25 annual report data, 105 flows, 46 nodes."
-    )
 
     st.info(
         "**Reading the chart** — Node width = revenue flowing through that company. "
@@ -960,6 +1029,10 @@ with tab3:
 
     # ── Build node arrays ──────────────────────────────────────────────────
     nodes_sc = sorted(set(df_sc["source"]) | set(df_sc["target"]))
+    st.caption(
+        "Revenue flows between named companies across five layers of the semiconductor supply chain. "
+        f"FY2024/25 annual report data, {len(df_sc)} flows, {len(nodes_sc)} nodes."
+    )
     n_idx_sc = {n: i for i, n in enumerate(nodes_sc)}
 
     def get_meta_sc(col, default):
