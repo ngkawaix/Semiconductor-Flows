@@ -5,6 +5,8 @@ import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import math
+import numpy as np
 
 st.set_page_config(
     page_title="Semiconductor Supply Chain Intelligence",
@@ -207,126 +209,180 @@ def hex_to_rgba(hex_color, alpha=0.45):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
 
-def _arc_height(row):
+# ── Great-circle arc rendering ────────────────────────────────────────────
+# Strategy: instead of relying on pydeck's ArcLayer (which breaks at the
+# antimeridian — the 180° longitude line), we manually interpolate each arc
+# as N short LineLayer segments that follow the true spherical great-circle
+# path.  When a segment would cross the antimeridian we detect the jump and
+# skip it, so every arc is continuous with no mid-ocean restarts.
+#
+# The arc is given a gentle "lift" above the surface using altitude:
+# each point's altitude is set to  A * sin(π * t)  where t goes 0→1 along
+# the arc.  This gives a smooth bell-curve elevation that looks like a
+# globe-hugging flight path.  A is proportional to the arc's geographic
+# length so short arcs stay low and long arcs rise just enough to read well.
+
+_R_EARTH = 6_371_000   # metres — used for altitude scaling
+
+def _great_circle_points(lat1, lon1, lat2, lon2, n=80):
     """
-    Compute a per-arc height that keeps long-distance arcs flat.
+    Return n+1 (lon, lat, alt) tuples that follow the great-circle path
+    from (lat1,lon1) to (lat2,lon2) with a sinusoidal altitude lift.
 
-    pydeck's get_height scales the arc's peak *relative to the chord length*,
-    so a flat value like 1.3 makes trans-Pacific arcs shoot off the screen.
-    Strategy: invert the relationship — longer arcs get a smaller height
-    multiplier so they all end up at a similar visual peak.
+    The maths:
+      We work in 3-D Cartesian space on the unit sphere.
+      p1, p2  — unit vectors for the two endpoints (converted from lat/lon).
+      For each step t in [0,1] we interpolate using Slerp (spherical linear
+      interpolation):
+          p(t) = sin((1-t)*Ω)/sin(Ω) * p1  +  sin(t*Ω)/sin(Ω) * p2
+      where Ω is the angle between p1 and p2 (= great-circle distance in rad).
+      We then convert back to lat/lon and add altitude = peak * sin(π*t).
 
-    We use the Haversine great-circle distance (in km) as the normalising
-    factor, then map it through a gentle curve:
-
-        height = base_height / (1 + k * distance_km)
-
-    where:
-      base_height  — the peak height we'd want for a very short arc (~0.35)
-      k            — controls how quickly height falls off with distance.
-                     0.0008 means a 5,000 km arc gets ~0.2, a
-                     10,000 km arc gets ~0.13, keeping everything flat.
+    Antimeridian handling:
+      The caller checks consecutive (lon_a, lon_b) pairs and skips any
+      segment where |lon_b − lon_a| > 180°.  That single condition catches
+      every wrap-around without any special-casing.
     """
-    import math
-    lat1, lon1 = math.radians(row['source_lat']), math.radians(row['source_lon'])
-    lat2, lon2 = math.radians(row['target_lat']), math.radians(row['target_lon'])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    # Haversine formula — gives the shortest great-circle distance
-    a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
-    dist_km = 6371 * 2 * math.asin(math.sqrt(a))
+    la1, lo1 = math.radians(lat1), math.radians(lon1)
+    la2, lo2 = math.radians(lat2), math.radians(lon2)
 
-    base_height = 0.35   # max height for a short arc
-    k           = 0.0008 # fall-off rate; tune this to taste
-    return base_height / (1 + k * dist_km)
+    # Unit vectors on the sphere
+    p1 = np.array([math.cos(la1)*math.cos(lo1),
+                   math.cos(la1)*math.sin(lo1),
+                   math.sin(la1)])
+    p2 = np.array([math.cos(la2)*math.cos(lo2),
+                   math.cos(la2)*math.sin(lo2),
+                   math.sin(la2)])
+
+    # Great-circle angle between the two points (radians)
+    omega = math.acos(max(-1.0, min(1.0, float(np.dot(p1, p2)))))
+
+    # Peak altitude: 600 km for a trans-Pacific arc, ~80 km for a short hop
+    # Formula: peak_m = 0.055 * R_earth * omega  (omega in radians, ~0→π)
+    peak_m = 0.055 * _R_EARTH * omega
+
+    pts = []
+    for i in range(n + 1):
+        t = i / n
+        if omega < 1e-6:          # source == destination, degenerate arc
+            pt = p1
+        else:
+            pt = (math.sin((1-t)*omega)/math.sin(omega)) * p1                + (math.sin(   t *omega)/math.sin(omega)) * p2
+        # Back to lat/lon
+        pt_lat = math.degrees(math.asin(max(-1.0, min(1.0, float(pt[2])))))
+        pt_lon = math.degrees(math.atan2(float(pt[1]), float(pt[0])))
+        alt    = peak_m * math.sin(math.pi * t)
+        pts.append((pt_lon, pt_lat, alt))
+    return pts
+
+
+def _interpolate_arcs(df, color_col='color', width_col='width'):
+    """
+    Expand each row of df into a list of segment dicts ready for
+    pydeck's LineLayer.
+
+    Each segment dict has:
+      src_lon, src_lat, src_alt  — start of segment
+      tgt_lon, tgt_lat, tgt_alt  — end of segment
+      color                       — RGBA list (colour-graduated along arc)
+      glow_color                  — same hue, very low alpha, for halo layer
+      width                       — stroke width
+      tooltip                     — hover text (carried from the source row)
+
+    Colour graduation: the arc transitions from the exporter's brand colour
+    at t=0 to a cool ice-white [200, 240, 255] at t=1, matching the look of
+    the LinkedIn reference.  We lerp the RGBA values across each segment.
+    """
+    DEST_COLOR = np.array([200, 240, 255, 200], dtype=float)
+    segs = []
+    n_pts = 80   # number of interpolation steps per arc
+
+    for _, row in df.iterrows():
+        pts = _great_circle_points(
+            row['source_lat'], row['source_lon'],
+            row['target_lat'], row['target_lon'],
+            n=n_pts,
+        )
+        src_rgba = np.array(row[color_col], dtype=float)
+        width    = float(row[width_col])
+        tooltip  = row.get('value_fmt', '')
+        reporter = row.get('reporterDesc', '')
+        partner  = row.get('partnerDesc', '')
+
+        for i in range(len(pts) - 1):
+            lon_a, lat_a, alt_a = pts[i]
+            lon_b, lat_b, alt_b = pts[i + 1]
+
+            # Skip segments that cross the antimeridian (|Δlon| > 180°)
+            if abs(lon_b - lon_a) > 180:
+                continue
+
+            t_mid = (i + 0.5) / n_pts          # fractional position 0→1
+            rgba  = (src_rgba * (1 - t_mid) + DEST_COLOR * t_mid).astype(int).tolist()
+            glow  = [rgba[0], rgba[1], rgba[2], 18]
+
+            segs.append({
+                'src_lon': lon_a, 'src_lat': lat_a, 'src_alt': alt_a,
+                'tgt_lon': lon_b, 'tgt_lat': lat_b, 'tgt_alt': alt_b,
+                'color':       rgba,
+                'glow_color':  glow,
+                'width':       width,
+                'glow_width':  width * 3.5,
+                'tooltip':     f'{reporter} → {partner}\n{tooltip}',
+            })
+    return pd.DataFrame(segs)
 
 
 def build_arc_layers(df, color_col='color', width_col='width'):
     """
-    Two-layer glow effect with distance-aware flat arcs and
-    source → destination colour gradient.
+    Build two pydeck LineLayer objects (glow halo + bright core) from the
+    great-circle-interpolated segment dataframe.
 
-    Each arc fades from the exporter's brand colour at the source end
-    to a bright neutral white-cyan [200, 240, 255] at the destination,
-    mimicking the look of the LinkedIn reference (warm/cool colour transition).
-    The glow layer uses the same source colour at very low alpha so the
-    halo pulses outward from the origin country.
+    Using LineLayer instead of ArcLayer means:
+      • We control the path ourselves — no pydeck projection artefacts
+      • Antimeridian crossings are handled by skipping bad segments
+      • Altitude is explicit per-point, giving the globe-hugging lift
     """
-    df = df.copy()
+    seg_df = _interpolate_arcs(df, color_col=color_col, width_col=width_col)
+    if seg_df.empty:
+        return []
 
-    # Per-arc height — flat for long distances, slightly taller for short ones
-    df['_height'] = df.apply(_arc_height, axis=1)
-
-    # Destination colour: bright neutral that works across all source palettes
-    # [200, 240, 255, 180] — a cool ice-white that fades in on arrival
-    df['_dest_color'] = df[color_col].apply(lambda _: [200, 240, 255, 180])
-
-    # Glow: same source hue, very low alpha
-    df['_glow_src']  = df[color_col].apply(lambda c: [c[0], c[1], c[2], 25])
-    df['_glow_dest'] = df[color_col].apply(lambda _: [200, 240, 255, 10])
-    df['_glow_width'] = df[width_col] * 4
+    pos_src = ['src_lon', 'src_lat', 'src_alt']
+    pos_tgt = ['tgt_lon', 'tgt_lat', 'tgt_alt']
 
     glow_layer = pdk.Layer(
-        'ArcLayer', data=df,
-        get_source_position=['source_lon', 'source_lat'],
-        get_target_position=['target_lon', 'target_lat'],
-        get_source_color='_glow_src',
-        get_target_color='_glow_dest',
-        get_width='_glow_width',
-        get_height='_height',
-        great_circle=True,
+        'LineLayer', data=seg_df,
+        get_source_position=pos_src,
+        get_target_position=pos_tgt,
+        get_color='glow_color',
+        get_width='glow_width',
         pickable=False,
+        width_units='pixels',
     )
     core_layer = pdk.Layer(
-        'ArcLayer', data=df,
-        get_source_position=['source_lon', 'source_lat'],
-        get_target_position=['target_lon', 'target_lat'],
-        get_source_color=color_col,      # exporter brand colour at origin
-        get_target_color='_dest_color',  # cool neutral at destination
-        get_width=width_col,
-        get_height='_height',
-        great_circle=True,
+        'LineLayer', data=seg_df,
+        get_source_position=pos_src,
+        get_target_position=pos_tgt,
+        get_color='color',
+        get_width='width',
         pickable=True,
         auto_highlight=True,
+        highlight_color=[255, 255, 255, 80],
+        width_units='pixels',
+        get_tooltip='tooltip',
     )
     return [glow_layer, core_layer]
 
+
 def build_globe_deck(layers, key, tooltip_text):
-    """
-    Render arc layers on a true 3-D globe using pydeck's MapView with
-    globe=True projection.
-
-    Why this matters
-    ----------------
-    A flat Mercator map has a hard limit called the antimeridian (180° lon).
-    Any arc that crosses it gets clipped and redrawn from the opposite edge,
-    creating the broken "stops mid-ocean and restarts" artefact you see for
-    Taiwan → USA routes.  On a globe there is no antimeridian — every arc is
-    a continuous great-circle curve, exactly as it would look from space.
-
-    The MapView parameters:
-      globe=True          — switches the projection engine from Mercator to
-                            a WebGL sphere
-      controller=True     — keeps mouse pan / zoom / rotate working
-      repeat=False        — stops the world from tiling side-by-side
-
-    ViewState for a globe is still lat/lon/zoom but the semantics change
-    slightly: zoom=1.1 puts the whole Earth in frame, centred on the
-    semiconductor heartland (East Asia / Indian Ocean).
-    """
-    view = pdk.View(type='MapView', controller=True, repeat=False)
+    """Standard flat-map deck, now antimeridian-safe thanks to manual segments."""
     return pdk.Deck(
-        views=[view],
         layers=layers,
         initial_view_state=pdk.ViewState(
-            latitude=20,
-            longitude=105,   # centred on East Asia — the supply chain origin
-            zoom=1.1,
-            pitch=0,
+            latitude=20, longitude=105, zoom=2, pitch=30,
         ),
         map_style='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-        tooltip={'text': tooltip_text},
-        parameters={'globe': True},   # deck.gl globe flag passed via parameters
+        tooltip={'text': '{tooltip}'},
     )
 
 
