@@ -22,7 +22,7 @@ def load_global_data():
     years = ','.join(str(y) for y in range(2018, 2026))
     df    = comtrade.getFinalData(
         key, typeCode='C', freqCode='A', clCode='HS', period=years,
-        reporterCode='156,490,410,528,842,392',
+        reporterCode='156,490,410,842,392',
         cmdCode='8542', flowCode='X',
         partnerCode=None, partner2Code=None, customsCode=None, motCode=None,
         maxRecords=250000, format_output='JSON', aggregateBy=None,
@@ -109,25 +109,28 @@ def load_sankey_data():
     return df, meta
 
 # ── Canonical colour palette ───────────────────────────────────────────────
+# Single canonical palette used by BOTH maps, both projections, and every
+# Sankey/time-series in Tab 1. Saturation chosen for legibility on the white
+# ocean: pale tints (old Japan/Netherlands/Germany) are darkened.
 country_hex = {
-    'Taiwan':        '#1d91c0',
-    'Rep. of Korea': '#41b6c4',
-    'China':         '#DC2626',
-    'Netherlands':   '#7fcdbb',
-    'USA':           '#225ea8',
-    'Japan':         '#c7e9b4',
-    'Germany':       '#9e9ac8',
+    'Taiwan':        '#1D91C0',   # blue
+    'Rep. of Korea': '#0D9488',   # teal-600
+    'China':         '#DC2626',   # red — explicit, for instant recognition
+    'Netherlands':   '#EA580C',   # orange-600
+    'USA':           '#225EA8',   # deep blue
+    'Japan':         '#65A30D',   # lime-600
+    'Germany':       '#7C3AED',   # violet-600
 }
 country_rgba = {
     'Taiwan':        [29,  145, 192, 210],
-    'Rep. of Korea': [65,  182, 196, 210],
+    'Rep. of Korea': [13,  148, 136, 210],
     'China':         [220,  38,  38, 210],
-    'Netherlands':   [127, 205, 187, 210],
+    'Netherlands':   [234,  88,  12, 210],
     'USA':           [34,   94, 168, 210],
-    'Japan':         [199, 233, 180, 210],
-    'Germany':       [158, 154, 200, 210],
+    'Japan':         [101, 163,  13, 210],
+    'Germany':       [124,  58, 237, 210],
 }
-IC_EXPORTERS    = ['Taiwan', 'Rep. of Korea', 'China', 'Netherlands', 'USA', 'Japan']
+IC_EXPORTERS    = ['Taiwan', 'Rep. of Korea', 'China', 'USA', 'Japan']
 EQUIP_EXPORTERS = ['Netherlands', 'USA', 'Japan', 'Germany', 'Rep. of Korea']
 src_hex       = {k: country_hex[k] for k in IC_EXPORTERS}
 equip_src_hex = {k: country_hex[k] for k in EQUIP_EXPORTERS}
@@ -328,11 +331,13 @@ def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
             if not globe and abs(lon_b - lon_a) > 180:
                 continue
             t_mid = (t_a + t_b) / 2
-            rgb   = _mix_with_white(src_rgb, 0.28 * t_mid)
+            # Constant saturated colour along the ribbon. (An earlier version
+            # lightened toward the head, but that fades the most important
+            # end of the flow — especially against a white ocean.)
             segs.append({
                 'src_lon': lon_a, 'src_lat': lat_a,
                 'tgt_lon': lon_b, 'tgt_lat': lat_b,
-                'color':   rgb + [230],
+                'color':   src_rgb + [245],
                 # Taper: 25% of width at the tail → 100% at the head
                 'width':   width * (0.25 + 0.75 * t_mid),
                 'tooltip': tooltip,
@@ -350,7 +355,7 @@ def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
             if len(p) > 1:
                 halo_paths.append({
                     'path':    p,
-                    'color':   src_rgb + [50],
+                    'color':   src_rgb + [40],
                     'width':   width * 2.1,
                     'tooltip': tooltip,
                 })
@@ -380,7 +385,7 @@ def _build_flow_geometry(df, color_col='color', width_col='width', globe=False):
                  lat_t - uy * a_len * 0.45 - ny * a_half]
         arrows.append({
             'polygon': [tip, baseL, baseR],
-            'color':   _mix_with_white(src_rgb, 0.28) + [255],
+            'color':   src_rgb + [255],
             'tooltip': tooltip,
         })
 
@@ -450,8 +455,8 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
     layers.append(pdk.Layer(
         'ScatterplotLayer', data=imp_df,
         get_position=['lon', 'lat'],
-        get_fill_color=[226, 232, 240, 220],
-        get_line_color=[15, 23, 42, 255],
+        get_fill_color=[255, 255, 255, 255],
+        get_line_color=[51, 65, 85, 255],
         get_radius=55000, radius_min_pixels=3, radius_max_pixels=6,
         stroked=True, line_width_min_pixels=1, pickable=True,
         parameters={'depthTest': False},
@@ -460,7 +465,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
         'ScatterplotLayer', data=exp_df,
         get_position=['lon', 'lat'],
         get_fill_color='fill',
-        get_line_color=[255, 255, 255, 230],
+        get_line_color=[15, 23, 42, 235],
         get_radius=90000, radius_min_pixels=5, radius_max_pixels=9,
         stroked=True, line_width_min_pixels=1.5, pickable=True,
         parameters={'depthTest': False},
@@ -472,7 +477,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
     layers.append(pdk.Layer(
         'TextLayer', data=imp_df,
         get_position=['lon', 'lat'], get_text='label',
-        get_color=[203, 213, 225, 235], get_size=11,
+        get_color=[71, 85, 105, 255], get_size=11,
         get_pixel_offset=[0, -14],
         font_family='Arial', font_weight=600,
         pickable=False,
@@ -480,7 +485,7 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
     layers.append(pdk.Layer(
         'TextLayer', data=exp_df,
         get_position=['lon', 'lat'], get_text='label',
-        get_color=[255, 255, 255, 255], get_size=14,
+        get_color=[15, 23, 42, 255], get_size=14,
         get_pixel_offset=[0, -16],
         font_family='Arial', font_weight=700,
         pickable=False,
@@ -489,18 +494,20 @@ def build_arc_layers(df, color_col='color', width_col='width', globe=False):
 
 
 # ── Shared basemap ──────────────────────────────────────────────────────────
-# Both projections draw the SAME custom grey earth (no external basemap),
+# Both projections draw the SAME custom light earth (no external basemap),
 # so the 2-D and 3-D views are guaranteed to use identical palettes:
-#   ocean #232A33 · land #4B5563 · borders #9CA3AF
+#   ocean white · land #B9C4D1 · borders white · frame #E2E8F0
 # Country polygons are Natural Earth GeoJSON fetched client-side.
 _NE_COUNTRIES_URL = (
     "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
     "master/geojson/ne_110m_admin_0_countries.geojson"
 )
 
-OCEAN_RGB  = [35, 42, 51]      # #232A33
-LAND_RGB   = [75, 85, 99]      # #4B5563 — grey earth
-BORDER_RGBA = [156, 163, 175, 150]   # #9CA3AF
+OCEAN_RGB   = [255, 255, 255]        # white ocean
+LAND_RGB    = [185, 196, 209]        # #B9C4D1 — grey earth
+BORDER_RGBA = [255, 255, 255, 210]   # crisp white borders on grey land
+FRAME_HEX   = "#E2E8F0"              # page bg behind the map/globe, so the
+                                     # white ocean reads as a distinct shape
 
 def _base_layers():
     return [
@@ -564,7 +571,7 @@ def render_flow_map(deck, key, globe=True, height=620):
     html = deck.to_html(as_string=True, notebook_display=False)
     html = html.replace(
         "</head>",
-        "<style>body{background:#232A33;margin:0;padding:0;overflow:hidden}</style></head>",
+        f"<style>body{{background:{FRAME_HEX};margin:0;padding:0;overflow:hidden}}</style></head>",
     )
     components.html(html, height=height)
 
@@ -725,11 +732,12 @@ with tab1:
         "Arc width proportional to export value. Data: UN Comtrade."
     )
     st.markdown(
-        "> **Why these countries?** These six nations account for the majority of global IC exports. "
+        "> **Why these countries?** These five nations account for the majority of global IC exports. "
         "**Taiwan** (TSMC, MediaTek), **South Korea** (Samsung Electronics, SK Hynix), "
         "**China** (SMIC, Hua Hong Semiconductor), **USA** (Intel, Texas Instruments), "
-        "**Japan** (Renesas, Kioxia, Sony Semiconductor), "
-        "**Netherlands** (NXP Semiconductors)."
+        "**Japan** (Renesas, Kioxia, Sony Semiconductor). "
+        "The Netherlands appears in the Equipment section below instead — its semiconductor "
+        "story is ASML's lithography monopoly, not chip exports."
     )
 
     df_arcs = (
