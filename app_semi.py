@@ -561,6 +561,20 @@ with st.spinner("Loading UN Comtrade data. This may take a moment on first load.
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 st.sidebar.title("Controls")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Select Year")
+st.sidebar.caption("Applies to the global map and all tabs.")
+year = st.sidebar.slider("Year", 2018, 2025, 2024, label_visibility="collapsed")
+
+projection = st.sidebar.radio(
+    "Projection",
+    ["🌐 3D Globe", "🗺️ Flat Map"],
+    index=0,
+    help="The globe is continuous, so trans-Pacific flows are never cut off. Drag to rotate.",
+)
+use_globe = projection.endswith("Globe")
+
 st.sidebar.markdown("### IC Exporters")
 st.sidebar.caption("Applies to the IC section of Tab 1.")
 selected_countries = []
@@ -570,16 +584,7 @@ for country in IC_EXPORTERS:          # alphabetical: China, Japan, Korea, Taiwa
         selected_countries.append(country)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### Equipment Exporters")
-st.sidebar.caption("Applies to the Equipment section of Tab 1.")
-selected_equip_countries = []
-for country in EQUIP_EXPORTERS:       # alphabetical: Germany, Japan, Netherlands, Korea, USA
-    hex_c = equip_src_hex[country]
-    if st.sidebar.checkbox(country, value=True, key=f"eq_toggle_{country}"):
-        selected_equip_countries.append(country)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Re-export Hubs")
+st.sidebar.markdown("### IC Re-exports Hubs")
 st.sidebar.caption(
     "Overlay IC re-export flows (HS 8542) from key intermediate hubs onto the IC map. "
     "These countries receive chips from primary exporters and forward them to final "
@@ -592,17 +597,13 @@ for hub in REEXPORT_HUBS:             # alphabetical: Hong Kong, Malaysia, Singa
         selected_hubs.append(hub)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### Select Year")
-st.sidebar.caption("Applies to the Global Supply Chain tab.")
-year = st.sidebar.slider("Year", 2018, 2025, 2024, label_visibility="collapsed")
-
-projection = st.sidebar.radio(
-    "Projection",
-    ["🌐 3D Globe", "🗺️ Flat Map"],
-    index=0,
-    help="The globe is continuous, so trans-Pacific flows are never cut off. Drag to rotate.",
-)
-use_globe = projection.endswith("Globe")
+st.sidebar.markdown("### Equipment Exporters")
+st.sidebar.caption("Applies to the Equipment section of Tab 1.")
+selected_equip_countries = []
+for country in EQUIP_EXPORTERS:       # alphabetical: Germany, Japan, Netherlands, Korea, USA
+    hex_c = equip_src_hex[country]
+    if st.sidebar.checkbox(country, value=True, key=f"eq_toggle_{country}"):
+        selected_equip_countries.append(country)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
