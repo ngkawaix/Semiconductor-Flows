@@ -232,56 +232,38 @@ def _wrap_lon(lon):
     return ((lon + 180.0) % 360.0) - 180.0
 
 
-def _flow_path(lat1, lon1, lat2, lon2, bow_deg, n=24):
+def _flow_path(lat1, lon1, lat2, lon2, bow_deg, n=60):
     """
-    Great-circle path from (lat1,lon1) to (lat2,lon2) with a sideways bow,
-    returned as a list of (wrapped_lon, lat) tuples.
+    Quadratic Bezier from (lat1,lon1) to (lat2,lon2), bowed sideways by
+    bow_deg degrees, returned as a list of (wrapped_lon, lat) tuples.
 
-    The base path is a spherical linear interpolation (slerp) between the two
-    points' 3-D unit vectors — i.e. the true shortest route over the sphere.
-    This matters on the orthographic globe: a Bezier in lon/lat space hugs
-    latitude circles and makes long flows look like they circumnavigate the
-    planet, whereas the great circle takes the natural arc (e.g. Amsterdam →
-    Taipei over Siberia). It also produces shorter on-screen paths = less SVG.
-
-    The bow is then applied as a lateral offset perpendicular to the local
-    path direction, scaled by sin(pi*t) so it peaks mid-flight and vanishes
-    at both endpoints — preserving the organised fan-out of converging flows.
+    Bezier formula (t goes 0 → 1 along the curve):
+        P(t) = (1-t)^2 * P0  +  2(1-t)t * C  +  t^2 * P1
+    where P0 = source, P1 = target, and C = control point = the midpoint
+    pushed perpendicular to the straight line by bow_deg. Positive bow bows
+    the curve to the LEFT of the direction of travel, so all flows share a
+    consistent, organised sweep. The target longitude is first "unwrapped"
+    to its nearest representation so trans-Pacific flows take the short way.
     """
-    la1, lo1 = math.radians(lat1), math.radians(lon1)
-    la2, lo2 = math.radians(lat2), math.radians(lon2)
-    v1 = (math.cos(la1) * math.cos(lo1), math.cos(la1) * math.sin(lo1), math.sin(la1))
-    v2 = (math.cos(la2) * math.cos(lo2), math.cos(la2) * math.sin(lo2), math.sin(la2))
-    dot = max(-1.0, min(1.0, v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]))
-    omega = math.acos(dot)
-    if omega < 1e-9:
+    if lon2 - lon1 > 180:
+        lon2 -= 360
+    elif lon2 - lon1 < -180:
+        lon2 += 360
+
+    dx, dy = lon2 - lon1, lat2 - lat1
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
         return []
-    sin_om = math.sin(omega)
 
-    base = []
+    px, py = -dy / dist, dx / dist
+    cx = (lon1 + lon2) / 2 + px * bow_deg
+    cy = (lat1 + lat2) / 2 + py * bow_deg
+
+    pts = []
     for i in range(n + 1):
         t = i / n
-        a = math.sin((1 - t) * omega) / sin_om
-        b = math.sin(t * omega) / sin_om
-        x, y, z = (a*v1[0] + b*v2[0], a*v1[1] + b*v2[1], a*v1[2] + b*v2[2])
-        lat = math.degrees(math.asin(max(-1.0, min(1.0, z))))
-        lon = math.degrees(math.atan2(y, x))
-        base.append((lon, lat))
-
-    # Lateral bow: offset perpendicular to local direction, peaking mid-path
-    pts = []
-    for i, (lon, lat) in enumerate(base):
-        t = i / n
-        j0, j1 = max(0, i - 1), min(n, i + 1)
-        dx = base[j1][0] - base[j0][0]
-        if dx > 180:    dx -= 360
-        elif dx < -180: dx += 360
-        dy = base[j1][1] - base[j0][1]
-        d = math.hypot(dx, dy)
-        if d > 1e-9:
-            nx, ny = -dy / d, dx / d
-            off = bow_deg * math.sin(math.pi * t)
-            lon, lat = lon + nx * off, lat + ny * off
+        lon = (1 - t) ** 2 * lon1 + 2 * (1 - t) * t * cx + t ** 2 * lon2
+        lat = (1 - t) ** 2 * lat1 + 2 * (1 - t) * t * cy + t ** 2 * lat2
         pts.append((_wrap_lon(lon), max(-85.0, min(85.0, lat))))
     return pts
 
@@ -308,57 +290,52 @@ def build_flow_fig(df, globe=True, height=620,
             step = (rank + 1) // 2 * 0.35
             bow_mult[idx] = 1.0 + step if rank % 2 == 1 else 1.0 - step
 
-    # ── Build geometry, GROUPED BY EXPORTER ────────────────────────────────
-    # Performance: scattergeo is SVG, and drag-rotation re-projects every
-    # trace on every frame. One trace per flow (the naive approach) means
-    # 50+ DOM paths for 25 flows. All flows from one exporter share a colour,
-    # so we merge them into ONE halo trace + ONE core trace per exporter,
-    # separated by None gaps — ~12 traces total. Line width is per-trace, so
-    # within each exporter we use its value-weighted mean width; relative
-    # importance across flows is still carried by the arrowhead size.
-    for rep, grp in df.groupby('reporterDesc', sort=False):
-        lons, lats, texts, sizes = [], [], [], []
-        r, g, b = list(grp.iloc[0][color_col])[:3]
-        for idx, row in grp.iterrows():
-            dlon = row['target_lon'] - row['source_lon']
-            if dlon > 180:    dlon -= 360
-            elif dlon < -180: dlon += 360
-            dist = math.hypot(dlon, row['target_lat'] - row['source_lat'])
-            bow  = max(1.0, min(dist * 0.10, 8.0)) * bow_mult.get(idx, 1.0)
+    flows = []
+    for idx, row in df.iterrows():
+        dlon = row['target_lon'] - row['source_lon']
+        if dlon > 180:    dlon -= 360
+        elif dlon < -180: dlon += 360
+        dist = math.hypot(dlon, row['target_lat'] - row['source_lat'])
+        bow  = max(1.2, min(dist * 0.12, 11.0)) * bow_mult.get(idx, 1.0)
 
-            pts = _flow_path(row['source_lat'], row['source_lon'],
-                             row['target_lat'], row['target_lon'], bow_deg=bow)
-            if not pts:
-                continue
-            hover = (f"{row.get('reporterDesc','')} → {row.get('partnerDesc','')}"
-                     f"<br><b>{row.get('value_fmt','')}</b>")
-            if lons:                       # gap between flows in the merged trace
-                lons.append(None); lats.append(None)
-                texts.append(''); sizes.append(0)
-            for j, (lon, lat) in enumerate(pts):
-                if j and lons[-1] is not None and abs(lon - lons[-1]) > 180:
-                    lons.append(None); lats.append(None)   # antimeridian break
-                    texts.append(''); sizes.append(0)
-                lons.append(lon); lats.append(lat)
-                texts.append(hover); sizes.append(0)
-            # Arrowhead at this flow's destination, sized by its own value
-            sizes[-1] = max(8, float(row[width_col]) * 2.4 + 4)
-
-        if not lons:
+        pts = _flow_path(row['source_lat'], row['source_lon'],
+                         row['target_lat'], row['target_lon'], bow_deg=bow)
+        if not pts:
             continue
-        w = float(np.sqrt((grp[width_col] ** 2 *
-                           grp['primaryValue']).sum() / grp['primaryValue'].sum()))
-        fig.add_trace(go.Scattergeo(                       # halo
-            lon=lons, lat=lats, mode='lines',
-            line=dict(width=w * 2.0, color=f"rgba({r},{g},{b},0.20)"),
+
+        # Insert a None break where the wrapped path jumps the antimeridian
+        lons, lats = [], []
+        for j, (lon, lat) in enumerate(pts):
+            if j and lons[-1] is not None and abs(lon - lons[-1]) > 180:
+                lons.append(None); lats.append(None)
+            lons.append(lon); lats.append(lat)
+
+        r, g, b = list(row[color_col])[:3]
+        flows.append(dict(
+            lons=lons, lats=lats, rgb=(r, g, b),
+            width=float(row[width_col]),
+            hover=f"{row.get('reporterDesc','')} → {row.get('partnerDesc','')}"
+                  f"<br><b>{row.get('value_fmt','')}</b>",
+        ))
+
+    for f in flows:                                            # halo pass
+        r, g, b = f['rgb']
+        fig.add_trace(go.Scattergeo(
+            lon=f['lons'], lat=f['lats'], mode='lines',
+            line=dict(width=f['width'] * 2.2, color=f"rgba({r},{g},{b},0.22)"),
             hoverinfo='skip', showlegend=False,
         ))
-        fig.add_trace(go.Scattergeo(                       # core + arrowheads
-            lon=lons, lat=lats, mode='lines+markers',
-            line=dict(width=w, color=f"rgba({r},{g},{b},0.95)"),
+    for f in flows:                                            # core + arrow
+        r, g, b = f['rgb']
+        n = len(f['lons'])
+        sizes = [0] * n
+        sizes[-1] = max(9, f['width'] * 2.4 + 5)
+        fig.add_trace(go.Scattergeo(
+            lon=f['lons'], lat=f['lats'], mode='lines+markers',
+            line=dict(width=f['width'], color=f"rgba({r},{g},{b},0.95)"),
             marker=dict(symbol='arrow', size=sizes, angleref='previous',
                         color=f"rgba({r},{g},{b},1)"),
-            hoverinfo='text', text=texts, showlegend=False,
+            hoverinfo='text', text=f['hover'], showlegend=False,
         ))
 
     # ── Country anchors ─────────────────────────────────────────────────────
@@ -537,10 +514,6 @@ st.sidebar.markdown("### Select Year")
 st.sidebar.caption("Applies to the Global Supply Chain tab.")
 year = st.sidebar.slider("Year", 2018, 2025, 2024, label_visibility="collapsed")
 
-st.sidebar.markdown("### Map Detail")
-st.sidebar.caption("Number of flows shown on each map. Fewer = cleaner story; more = fuller picture.")
-max_flows = st.sidebar.slider("Top N flows", 10, 60, 25, step=5, label_visibility="collapsed")
-
 projection = st.sidebar.radio(
     "Projection",
     ["🌐 3D Globe", "🗺️ Flat Map"],
@@ -596,18 +569,53 @@ with tab1:
         .merge(coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}), on='reporterISO', how='inner')
         .merge(coords_df.rename(columns={'ISO':'partnerISO', 'lat':'target_lat', 'lon':'target_lon'}), on='partnerISO',  how='inner')
     )
-    top_partners = (
-        df_arcs.groupby('partnerISO')['primaryValue']
-        .sum().sort_values(ascending=False).head(15).index.tolist()
-    )
+    # All partner flows are kept — no top-N truncation (small flows like
+    # equipment to Singapore or Malaysia matter to the ASEAN story).
     df_arcs = (
-        df_arcs[df_arcs['partnerISO'].isin(top_partners)]
+        df_arcs
         .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
                   'period','source_lat','source_lon','target_lat','target_lon'])
         ['primaryValue'].sum().reset_index()
     )
 
     df_year     = df_arcs[(df_arcs['period']==str(year)) & (df_arcs['reporterDesc'].isin(selected_countries))].copy()
+
+    # ── Map ↔ Sankey consistency ────────────────────────────────────────────
+    # The map keeps the YEAR's top-15 partners (beyond that, marginal utility
+    # is low and the map clutters), UNIONED with the destinations the Sankey
+    # below will show for the same year — so any flow visible in the Sankey
+    # (e.g. Netherlands → Singapore on the equipment side) is guaranteed to
+    # also appear on the map. Note the Sankey excludes exporter nations from
+    # its destination side by design; the map keeps them (e.g. flows INTO
+    # China and into China, Hong Kong SAR), since geography is the point here.
+    sankey_dest_ic = set(
+        df_global[(df_global['period'] == str(year)) &
+                  (df_global['reporterDesc'].isin(selected_countries)) &
+                  (~df_global['partnerDesc'].isin(set(IC_EXPORTERS)))]
+        .groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+    )
+    top15_ic = set(
+        df_year.groupby('partnerISO')['primaryValue'].sum().nlargest(15).index
+    )
+    df_year = df_year[
+        df_year['partnerISO'].isin(top15_ic) |
+        df_year['partnerDesc'].isin(sankey_dest_ic)
+    ].copy()
+
+    # Diagnostic: partners that can never appear on the map because they have
+    # no entry in the coordinates table (the coords merge is an inner join).
+    _ic_known = set(coords_df['ISO'])
+    _ic_missing = (
+        df_global[(df_global['period'] == str(year)) &
+                  (df_global['reporterDesc'].isin(selected_countries)) &
+                  (~df_global['partnerISO'].isin(_ic_known))]
+        .groupby('partnerDesc')['primaryValue'].sum().nlargest(5)
+    )
+    if not _ic_missing.empty and _ic_missing.iloc[0] > 1e9:
+        st.caption(
+            "⚠️ Not mappable (no coordinates on file): "
+            + ", ".join(f"{k} ({fmt(v)})" for k, v in _ic_missing.items())
+        )
     df_year_all = df_global[df_global['period']==str(year)]
     df_prev_all = df_global[df_global['period']==str(year-1)] if year > 2018 else None
 
@@ -624,8 +632,6 @@ with tab1:
     st.markdown("---")
 
     if selected_countries and not df_year.empty:
-        # Keep only the top N flows so the map stays readable
-        df_year = df_year.nlargest(max_flows, 'primaryValue').copy()
         df_year['color'] = df_year['reporterDesc'].map(country_rgba)
         # Square-root scaling keeps large flows readable without drowning small
         # ones. Normalised against the ALL-YEARS maximum so ribbon widths are
@@ -665,7 +671,7 @@ with tab1:
         df_sk['reporterDesc'].isin(selected_countries) &
         ~df_sk['partnerDesc'].isin(producer_set)
     ]
-    top_dest = df_sk.groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+    top_dest = sorted(sankey_dest_ic)   # same set the map was guaranteed to include
     df_sk    = df_sk[df_sk['partnerDesc'].isin(top_dest)]
 
     if not df_sk.empty:
@@ -723,18 +729,41 @@ with tab1:
         .merge(coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}), on='reporterISO', how='inner')
         .merge(coords_df.rename(columns={'ISO':'partnerISO', 'lat':'target_lat', 'lon':'target_lon'}), on='partnerISO',  how='inner')
     )
-    top_partners_eq = (
-        df_arcs_eq.groupby('partnerISO')['primaryValue']
-        .sum().sort_values(ascending=False).head(15).index.tolist()
-    )
     df_arcs_eq = (
-        df_arcs_eq[df_arcs_eq['partnerISO'].isin(top_partners_eq)]
+        df_arcs_eq
         .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
                   'period','source_lat','source_lon','target_lat','target_lon'])
         ['primaryValue'].sum().reset_index()
     )
 
     df_eq_year     = df_arcs_eq[(df_arcs_eq['period']==str(year)) & (df_arcs_eq['reporterDesc'].isin(selected_equip_countries))].copy()
+
+    # Map ↔ Sankey consistency (see IC section for rationale)
+    sankey_dest_eq = set(
+        df_global_equip[(df_global_equip['period'] == str(year)) &
+                        (df_global_equip['reporterDesc'].isin(selected_equip_countries)) &
+                        (~df_global_equip['partnerDesc'].isin(set(EQUIP_EXPORTERS)))]
+        .groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+    )
+    top15_eq = set(
+        df_eq_year.groupby('partnerISO')['primaryValue'].sum().nlargest(15).index
+    )
+    df_eq_year = df_eq_year[
+        df_eq_year['partnerISO'].isin(top15_eq) |
+        df_eq_year['partnerDesc'].isin(sankey_dest_eq)
+    ].copy()
+
+    _eq_missing = (
+        df_global_equip[(df_global_equip['period'] == str(year)) &
+                        (df_global_equip['reporterDesc'].isin(selected_equip_countries)) &
+                        (~df_global_equip['partnerISO'].isin(set(coords_df['ISO'])))]
+        .groupby('partnerDesc')['primaryValue'].sum().nlargest(5)
+    )
+    if not _eq_missing.empty and _eq_missing.iloc[0] > 1e9:
+        st.caption(
+            "⚠️ Not mappable (no coordinates on file): "
+            + ", ".join(f"{k} ({fmt(v)})" for k, v in _eq_missing.items())
+        )
     df_eq_year_all = df_global_equip[df_global_equip['period']==str(year)]
     df_eq_prev_all = df_global_equip[df_global_equip['period']==str(year-1)] if year > 2018 else None
 
@@ -759,7 +788,6 @@ with tab1:
     st.markdown("---")
 
     if selected_equip_countries and not df_eq_year.empty:
-        df_eq_year = df_eq_year.nlargest(max_flows, 'primaryValue').copy()
         df_eq_year['color'] = df_eq_year['reporterDesc'].map(country_rgba)
         global_max_eq = df_arcs_eq['primaryValue'].max()
         df_eq_year['width'] = (np.sqrt(df_eq_year['primaryValue'] / global_max_eq) * 6).clip(lower=1.0)
@@ -792,7 +820,7 @@ with tab1:
         df_sk_eq['reporterDesc'].isin(selected_equip_countries) &
         ~df_sk_eq['partnerDesc'].isin(producer_set_eq)
     ]
-    top_eq_dest = df_sk_eq.groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+    top_eq_dest = sorted(sankey_dest_eq)   # same set the map was guaranteed to include
     df_sk_eq    = df_sk_eq[df_sk_eq['partnerDesc'].isin(top_eq_dest)]
 
     if not df_sk_eq.empty:
