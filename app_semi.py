@@ -299,7 +299,7 @@ def _interpolate_arcs(df, color_col='color', width_col='width'):
 
     This mimics how tools like Kepler.gl draw "brushed" flow maps.
     """
-    DEST_COLOR  = np.array([200, 240, 255, 200], dtype=float)
+    DEST_COLOR  = np.array([200, 240, 255, 255], dtype=float)
     FAN_DEG     = 0.45   # lateral spread between neighbouring arcs (degrees)
     n_pts       = 80
 
@@ -359,17 +359,15 @@ def _interpolate_arcs(df, color_col='color', width_col='width'):
             lon_b  += nudge * perp_lon
             lat_b  += nudge * perp_lat
 
-            rgba  = (src_rgba * (1 - t_mid) + DEST_COLOR * t_mid).astype(int).tolist()
-            glow  = [rgba[0], rgba[1], rgba[2], 18]
+            rgba = (src_rgba * (1 - t_mid) + DEST_COLOR * t_mid).astype(int).tolist()
+            rgba[3] = 255  # fully opaque — no semi-transparent overlap haze
 
             segs.append({
                 'src_lon': lon_a, 'src_lat': lat_a, 'src_alt': alt_a,
                 'tgt_lon': lon_b, 'tgt_lat': lat_b, 'tgt_alt': alt_b,
-                'color':       rgba,
-                'glow_color':  glow,
-                'width':       width,
-                'glow_width':  width * 3,
-                'tooltip':     f'{reporter} → {partner}\n{tooltip}',
+                'color':   rgba,
+                'width':   width,
+                'tooltip': f'{reporter} → {partner}\n{tooltip}',
             })
     return pd.DataFrame(segs)
 
@@ -391,15 +389,6 @@ def build_arc_layers(df, color_col='color', width_col='width'):
     pos_src = ['src_lon', 'src_lat', 'src_alt']
     pos_tgt = ['tgt_lon', 'tgt_lat', 'tgt_alt']
 
-    glow_layer = pdk.Layer(
-        'LineLayer', data=seg_df,
-        get_source_position=pos_src,
-        get_target_position=pos_tgt,
-        get_color='glow_color',
-        get_width='glow_width',
-        pickable=False,
-        width_units='pixels',
-    )
     core_layer = pdk.Layer(
         'LineLayer', data=seg_df,
         get_source_position=pos_src,
@@ -408,11 +397,11 @@ def build_arc_layers(df, color_col='color', width_col='width'):
         get_width='width',
         pickable=True,
         auto_highlight=True,
-        highlight_color=[255, 255, 255, 80],
+        highlight_color=[255, 255, 255, 120],
         width_units='pixels',
         get_tooltip='tooltip',
     )
-    return [glow_layer, core_layer]
+    return [core_layer]
 
 
 def build_globe_deck(layers, key, tooltip_text):
