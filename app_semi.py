@@ -709,7 +709,8 @@ st.sidebar.caption(
 selected_countries = []
 for country in IC_EXPORTERS:          # alphabetical: China, Japan, Korea, Taiwan, USA
     hex_c = src_hex[country]
-    if st.sidebar.checkbox(country, value=True, key=f"toggle_{country}"):
+    default_on = country in ('Taiwan', 'Rep. of Korea')
+    if st.sidebar.checkbox(country, value=default_on, key=f"toggle_{country}"):
         selected_countries.append(country)
 
 st.sidebar.markdown("### IC Re-exports Hubs")
