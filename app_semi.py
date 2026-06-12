@@ -22,6 +22,17 @@ _COMTRADE_RENAME = {
     'Viet Nam':             'Vietnam',       # Localise spelling
 }
 
+def _fix_taiwan_iso(df):
+    """'Other Asia, nes' (Comtrade code 490 = Taiwan) has no standard ISO3 —
+    reporterISO/partnerISO come back blank/non-standard for these rows, so
+    after _COMTRADE_RENAME maps the *Desc to 'Taiwan', the row still fails
+    the inner-join to coords_df (keyed on real ISO3 'TWN'). Fix the ISO
+    columns directly off the already-renamed Desc columns so the merge
+    succeeds regardless of whatever raw ISO Comtrade returned."""
+    df.loc[df['reporterDesc'] == 'Taiwan', 'reporterISO'] = 'TWN'
+    df.loc[df['partnerDesc']  == 'Taiwan', 'partnerISO']  = 'TWN'
+    return df
+
 @st.cache_data
 def load_global_data():
     key   = st.secrets["COMTRADE_KEY"]
@@ -39,6 +50,7 @@ def load_global_data():
     df   = df[df['partnerISO'] != 'W00']
     df['reporterDesc'] = df['reporterDesc'].replace(_COMTRADE_RENAME)
     df['partnerDesc']  = df['partnerDesc'].replace(_COMTRADE_RENAME)
+    df = _fix_taiwan_iso(df)
     df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
     return df
 
@@ -60,6 +72,7 @@ def load_global_equip_data():
     df   = df[df['partnerISO'] != 'W00']
     df['reporterDesc'] = df['reporterDesc'].replace(_COMTRADE_RENAME)
     df['partnerDesc']  = df['partnerDesc'].replace(_COMTRADE_RENAME)
+    df = _fix_taiwan_iso(df)
     df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
     return df
 
@@ -85,6 +98,7 @@ def load_reexport_data():
     df   = df[df['partnerISO'] != 'W00']
     df['reporterDesc'] = df['reporterDesc'].replace(_COMTRADE_RENAME)
     df['partnerDesc']  = df['partnerDesc'].replace(_COMTRADE_RENAME)
+    df = _fix_taiwan_iso(df)
     df['primaryValue'] = pd.to_numeric(df['primaryValue'], errors='coerce')
     return df
 
@@ -323,6 +337,15 @@ country_coords = {
     'ZMB': (-13.1339, 27.8493),   'ZWE': (-19.0154, 29.1549)
 }
 
+# Built once at import time (country_coords is static) — avoids rebuilding
+# this small but frequently-merged-on DataFrame from a 250-entry dict on
+# every Streamlit rerun (the whole script reruns on any widget interaction,
+# even ones in other tabs).
+coords_df = (
+    pd.DataFrame.from_dict(country_coords, orient='index', columns=['lat','lon'])
+    .reset_index().rename(columns={'index':'ISO'})
+)
+
 def fmt(val):
     if pd.isna(val):  return 'N/A'
     if val >= 1e12:   return f"${val/1e12:.2f}T"
@@ -338,6 +361,25 @@ def hex_to_rgba(hex_color, alpha=0.45):
     h = hex_color.lstrip('#')
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha})'
+
+@st.cache_data
+def build_arc_df(df_in):
+    """Merge a Comtrade flow table onto coords_df (source + target lat/lon)
+    and collapse to one row per (reporter, partner, period). This spans
+    ALL years/reporters in df_in and previously ran on every Streamlit
+    rerun regardless of which year/tab the user was on — caching it means
+    it only recomputes when the underlying loaded data actually changes."""
+    df_out = (
+        df_in
+        .merge(coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}), on='reporterISO', how='inner')
+        .merge(coords_df.rename(columns={'ISO':'partnerISO', 'lat':'target_lat', 'lon':'target_lon'}), on='partnerISO',  how='inner')
+    )
+    return (
+        df_out
+        .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
+                  'period','source_lat','source_lon','target_lat','target_lon'])
+        ['primaryValue'].sum().reset_index()
+    )
 
 # ── Flow-map rendering (Plotly geo) ─────────────────────────────────────────
 # Implementation note: earlier versions used pydeck. The flat MapView broke
@@ -395,6 +437,7 @@ def _flow_path(lat1, lon1, lat2, lon2, bow_deg, n=60):
     return pts
 
 
+@st.cache_data
 def build_flow_fig(df, globe=True, height=620,
                    color_col='color', width_col='width'):
     """
@@ -425,8 +468,15 @@ def build_flow_fig(df, globe=True, height=620,
         dist = math.hypot(dlon, row['target_lat'] - row['source_lat'])
         bow  = max(1.2, min(dist * 0.12, 11.0)) * bow_mult.get(idx, 1.0)
 
+        # Adaptive curve resolution: short hops (e.g. Korea→Japan, a few
+        # degrees) render identically with far fewer points than long
+        # transoceanic flows, but every point becomes an SVG vertex on
+        # BOTH the halo and core traces — fewer points = lighter figure
+        # and snappier globe rotation, with no visible change in shape.
+        n = int(np.clip(round(dist * 0.6), 16, 60))
+
         pts = _flow_path(row['source_lat'], row['source_lon'],
-                         row['target_lat'], row['target_lon'], bow_deg=bow)
+                         row['target_lat'], row['target_lon'], bow_deg=bow, n=n)
         if not pts:
             continue
 
@@ -532,6 +582,7 @@ def build_flow_fig(df, globe=True, height=620,
 
 _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ffffd9','#f7fcb9']
 
+@st.cache_data
 def build_sankey_fig(df_flow, hex_palette):
     src_nodes = list(df_flow['reporterDesc'].unique())
     tgt_nodes = list(df_flow['partnerDesc'].unique())
@@ -703,11 +754,6 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     st.title("Global Semiconductor Trade Flows")
 
-    coords_df = (
-        pd.DataFrame.from_dict(country_coords, orient='index', columns=['lat','lon'])
-        .reset_index().rename(columns={'index':'ISO'})
-    )
-
     # ══ SECTION 1 — INTEGRATED CIRCUITS (HS 8542) ════════════════════════════
     st.header("🔬 Integrated Circuits (HS 8542)")
     st.caption(
@@ -724,19 +770,9 @@ with tab1:
         "story is ASML's lithography monopoly, not chip exports."
     )
 
-    df_arcs = (
-        df_global
-        .merge(coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}), on='reporterISO', how='inner')
-        .merge(coords_df.rename(columns={'ISO':'partnerISO', 'lat':'target_lat', 'lon':'target_lon'}), on='partnerISO',  how='inner')
-    )
+    df_arcs = build_arc_df(df_global)
     # All partner flows are kept — no top-N truncation (small flows like
     # equipment to Singapore or Malaysia matter to the ASEAN story).
-    df_arcs = (
-        df_arcs
-        .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
-                  'period','source_lat','source_lon','target_lat','target_lon'])
-        ['primaryValue'].sum().reset_index()
-    )
 
     df_year     = df_arcs[(df_arcs['period']==str(year)) & (df_arcs['reporterDesc'].isin(selected_countries))].copy()
 
@@ -808,20 +844,7 @@ with tab1:
         # (hub volumes are smaller, so arcs naturally appear thinner).
         df_hub_ic = pd.DataFrame()
         if selected_hubs and not df_reexport.empty:
-            _hub_arcs = (
-                df_reexport
-                .merge(
-                    coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}),
-                    on='reporterISO', how='inner'
-                )
-                .merge(
-                    coords_df.rename(columns={'ISO':'partnerISO','lat':'target_lat','lon':'target_lon'}),
-                    on='partnerISO', how='inner'
-                )
-                .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
-                          'period','source_lat','source_lon','target_lat','target_lon'])
-                ['primaryValue'].sum().reset_index()
-            )
+            _hub_arcs = build_arc_df(df_reexport)
             _hub_yr = _hub_arcs[
                 (_hub_arcs['period'] == str(year)) &
                 (_hub_arcs['reporterDesc'].isin(selected_hubs))
@@ -934,17 +957,7 @@ with tab1:
         "**South Korea** (Samsung's equipment division, Jusung Engineering)."
     )
 
-    df_arcs_eq = (
-        df_global_equip
-        .merge(coords_df.rename(columns={'ISO':'reporterISO','lat':'source_lat','lon':'source_lon'}), on='reporterISO', how='inner')
-        .merge(coords_df.rename(columns={'ISO':'partnerISO', 'lat':'target_lat', 'lon':'target_lon'}), on='partnerISO',  how='inner')
-    )
-    df_arcs_eq = (
-        df_arcs_eq
-        .groupby(['reporterDesc','reporterISO','partnerDesc','partnerISO',
-                  'period','source_lat','source_lon','target_lat','target_lon'])
-        ['primaryValue'].sum().reset_index()
-    )
+    df_arcs_eq = build_arc_df(df_global_equip)
 
     df_eq_year     = df_arcs_eq[(df_arcs_eq['period']==str(year)) & (df_arcs_eq['reporterDesc'].isin(selected_equip_countries))].copy()
 
