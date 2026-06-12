@@ -584,11 +584,23 @@ _YLGNBU_DEST = ['#225ea8','#1d91c0','#41b6c4','#7fcdbb','#c7e9b4','#edf8b1','#ff
 
 @st.cache_data
 def build_sankey_fig(df_flow, hex_palette):
+    """Two-column Sankey: exporters (left) → importers (right).
+
+    A country may legitimately appear on BOTH sides — e.g. China is both an
+    IC exporter and the world's largest IC importer; Korea both exports and
+    imports equipment. Source and target nodes therefore live in SEPARATE
+    index spaces (Plotly allows duplicate labels as long as indices differ).
+    A single shared name→index dict would silently collapse the two roles
+    and mis-wire the links."""
+    # Guard against degenerate self-flows (Comtrade should never report a
+    # country as its own partner, but the inner logic assumes it doesn't).
+    df_flow = df_flow[df_flow['reporterDesc'] != df_flow['partnerDesc']]
+
     src_nodes = list(df_flow['reporterDesc'].unique())
     tgt_nodes = list(df_flow['partnerDesc'].unique())
     all_nodes = src_nodes + tgt_nodes
-    node_idx  = {n: i for i, n in enumerate(all_nodes)}
-    n_tgt = len(tgt_nodes)
+    src_idx = {n: i for i, n in enumerate(src_nodes)}
+    tgt_idx = {n: i + len(src_nodes) for i, n in enumerate(tgt_nodes)}
 
     # Destination node colours: use the canonical country palette for any
     # country we recognise (so China is always red, Korea always teal, etc.
@@ -607,8 +619,8 @@ def build_sankey_fig(df_flow, hex_palette):
         [hex_palette.get(n, '#888888') for n in src_nodes] +
         tgt_colors
     )
-    link_sources = [node_idx[r] for r in df_flow['reporterDesc']]
-    link_targets  = [node_idx[t] for t in df_flow['partnerDesc']]
+    link_sources = [src_idx[r] for r in df_flow['reporterDesc']]
+    link_targets  = [tgt_idx[t] for t in df_flow['partnerDesc']]
     link_values   = (df_flow['primaryValue'] / 1e9).round(1).tolist()
     link_colors   = [hex_to_rgba(hex_palette.get(r, '#888888')) for r in df_flow['reporterDesc']]
     height = max(480, max(len(src_nodes), len(tgt_nodes)) * 60 + 100)
@@ -782,14 +794,17 @@ with tab1:
     # is low and the map clutters), UNIONED with the destinations the Sankey
     # below will show for the same year — so any flow visible in the Sankey
     # (e.g. Netherlands → Singapore on the equipment side) is guaranteed to
-    # also appear on the map. Note the Sankey excludes exporter nations from
-    # its destination side by design; the map keeps them (e.g. flows INTO
-    # China and into China, Hong Kong SAR), since geography is the point here.
+    # also appear on the map. Both views now include producer nations as
+    # destinations, so map and Sankey share the same inclusion philosophy.
+    # NOTE: producer nations are deliberately INCLUDED as destinations.
+    # China is the world's largest IC importer; excluding exporters from the
+    # destination side (as earlier versions did) hid the dominant flows of
+    # the entire system (Taiwan→China, Korea→China) and showed only the
+    # residual periphery.
     sankey_dest_ic = set(
         df_global[(df_global['period'] == str(year)) &
-                  (df_global['reporterDesc'].isin(selected_countries)) &
-                  (~df_global['partnerDesc'].isin(set(IC_EXPORTERS)))]
-        .groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+                  (df_global['reporterDesc'].isin(selected_countries))]
+        .groupby('partnerDesc')['primaryValue'].sum().nlargest(15).index
     )
     top15_ic = set(
         df_year.groupby('partnerISO')['primaryValue'].sum().nlargest(15).index
@@ -823,9 +838,15 @@ with tab1:
     yoy          = f"{((total_cur-total_prev)/total_prev*100):+.1f}% YoY" if total_prev else None
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total IC Exports",  fmt(total_cur),        delta=yoy)
-    c2.metric("Taiwan's Share",    f"{taiwan_share:.1f}%")
-    c3.metric("China's Share",     f"{china_share:.1f}%")
+    c1.metric("Tracked IC Exports (5 reporters)",  fmt(total_cur), delta=yoy,
+              help="Sum of gross HS 8542 exports from the five tracked reporter "
+                   "nations only — NOT world exports. Gross flows double-count "
+                   "chips that cross borders more than once.")
+    c2.metric("Taiwan's Share of Tracked",  f"{taiwan_share:.1f}%",
+              help="Taiwan ÷ sum of the five tracked reporters. Taiwan's share "
+                   "of *world* IC exports is lower.")
+    c3.metric("China's Share of Tracked",   f"{china_share:.1f}%",
+              help="China ÷ sum of the five tracked reporters.")
     st.markdown("---")
 
     if selected_countries and not df_year.empty:
@@ -892,19 +913,19 @@ with tab1:
     st.subheader("IC exporters to importers")
     st.caption(
         f"Left: {len(IC_EXPORTERS)} major IC-exporting nations. "
-        "Right: their top 8 importing countries for the selected year (excluding other exporters)."
+        "Right: their top 15 import destinations for the selected year. "
+        "Producer nations appear on both sides — China, Korea, Taiwan, the USA and Japan "
+        "are simultaneously among the largest IC exporters *and* importers, because chips "
+        "cross borders repeatedly between fabrication, test/assembly and final integration. "
+        "Values are gross trade flows, not value-added."
     )
 
-    producer_set = set(IC_EXPORTERS)
     df_sk = (
         df_global[df_global['period'] == str(year)]
         .groupby(['reporterDesc', 'partnerDesc'])['primaryValue']
         .sum().reset_index()
     )
-    df_sk = df_sk[
-        df_sk['reporterDesc'].isin(selected_countries) &
-        ~df_sk['partnerDesc'].isin(producer_set)
-    ]
+    df_sk = df_sk[df_sk['reporterDesc'].isin(selected_countries)]
     top_dest = sorted(sankey_dest_ic)   # same set the map was guaranteed to include
     df_sk    = df_sk[df_sk['partnerDesc'].isin(top_dest)]
 
@@ -963,12 +984,13 @@ with tab1:
 
     df_eq_year     = df_arcs_eq[(df_arcs_eq['period']==str(year)) & (df_arcs_eq['reporterDesc'].isin(selected_equip_countries))].copy()
 
-    # Map ↔ Sankey consistency (see IC section for rationale)
+    # Map ↔ Sankey consistency (see IC section for rationale).
+    # Producer nations included as destinations: Korea and the USA are both
+    # major equipment exporters and major equipment importers.
     sankey_dest_eq = set(
         df_global_equip[(df_global_equip['period'] == str(year)) &
-                        (df_global_equip['reporterDesc'].isin(selected_equip_countries)) &
-                        (~df_global_equip['partnerDesc'].isin(set(EQUIP_EXPORTERS)))]
-        .groupby('partnerDesc')['primaryValue'].sum().nlargest(8).index
+                        (df_global_equip['reporterDesc'].isin(selected_equip_countries))]
+        .groupby('partnerDesc')['primaryValue'].sum().nlargest(15).index
     )
     top15_eq = set(
         df_eq_year.groupby('partnerISO')['primaryValue'].sum().nlargest(15).index
@@ -1000,16 +1022,29 @@ with tab1:
         / total_eq_cur * 100
     ) if total_eq_cur > 0 else 0
     producer_set_eq = set(EQUIP_EXPORTERS)
+    # Largest buyer computed over ALL destinations, including producer
+    # nations — Korea and Taiwan are among the world's biggest tool buyers,
+    # and excluding them (as earlier versions did) misstated the answer.
     top_eq_dest_ser = (
-        df_eq_year_all[~df_eq_year_all['partnerDesc'].isin(producer_set_eq)]
+        df_eq_year_all
         .groupby('partnerDesc')['primaryValue'].sum()
     )
     top_eq_importer = top_eq_dest_ser.idxmax() if not top_eq_dest_ser.empty else 'N/A'
 
     e1, e2, e3 = st.columns(3)
-    e1.metric("Total Equipment Exports",    fmt(total_eq_cur), delta=yoy_eq)
-    e2.metric("Netherlands' Share (ASML)",  f"{nld_share:.1f}%")
-    e3.metric("Largest Equipment Buyer",    top_eq_importer)
+    e1.metric("Tracked Equipment Exports (5 reporters)", fmt(total_eq_cur), delta=yoy_eq,
+              help="Sum of gross HS 8486 exports from the five tracked reporter "
+                   "nations only — NOT world exports. Note HS 8486 also covers "
+                   "flat-panel-display equipment, and excludes test equipment "
+                   "(HS 9030), so this is an imperfect proxy for 'semiconductor "
+                   "equipment'.")
+    e2.metric("Netherlands' Share of Tracked", f"{nld_share:.1f}%",
+              help="Netherlands ÷ sum of the five tracked reporters. Dutch HS 8486 "
+                   "exports are dominated by ASML but also include ASM International "
+                   "and BESI.")
+    e3.metric("Largest Equipment Buyer", top_eq_importer,
+              help="Largest import destination among the tracked reporters' exports, "
+                   "including producer nations themselves.")
     st.markdown("---")
 
     if selected_equip_countries and not df_eq_year.empty:
@@ -1033,7 +1068,10 @@ with tab1:
     st.subheader("Equipment exporters to importers")
     st.caption(
         "Left: 5 major equipment-exporting nations. "
-        "Right: their top 8 importing countries for the selected year (excluding other exporters)."
+        "Right: their top 15 import destinations for the selected year. "
+        "Producer nations appear on both sides — Korea and the USA both export and import "
+        "tools, and intra-supply-chain shipments (e.g. Zeiss optics from Germany to ASML "
+        "in the Netherlands) are real flows, not noise. Values are gross trade flows."
     )
 
     df_sk_eq = (
@@ -1041,10 +1079,7 @@ with tab1:
         .groupby(['reporterDesc', 'partnerDesc'])['primaryValue']
         .sum().reset_index()
     )
-    df_sk_eq = df_sk_eq[
-        df_sk_eq['reporterDesc'].isin(selected_equip_countries) &
-        ~df_sk_eq['partnerDesc'].isin(producer_set_eq)
-    ]
+    df_sk_eq = df_sk_eq[df_sk_eq['reporterDesc'].isin(selected_equip_countries)]
     top_eq_dest = sorted(sankey_dest_eq)   # same set the map was guaranteed to include
     df_sk_eq    = df_sk_eq[df_sk_eq['partnerDesc'].isin(top_eq_dest)]
 
