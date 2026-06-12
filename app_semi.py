@@ -913,6 +913,7 @@ with tab1:
     else:
         st.info("Select at least one IC exporter in the sidebar to display the Sankey.")
 
+    ##  IC Export Trends by Country
     st.markdown("---")
     st.subheader("IC Export Trends by Country (2018–2025)")
     df_trend = (
